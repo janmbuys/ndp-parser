@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 import time
+from pathlib import Path
 
 import utils
 
@@ -21,6 +22,9 @@ if __name__=='__main__':
   parser.add_argument('--dev_name',
                       help='Dev file name (excluding .conll)', 
                       default='dev')
+  parser.add_argument('--test_name',
+                      help='Test file name (excluding .conll)', 
+                      default='test')
   parser.add_argument('--test_file',
                       help='Raw text file to parse with trained model', 
                       metavar='FILE')
@@ -28,14 +32,27 @@ if __name__=='__main__':
                       default=False)
 
   args = parser.parse_args()
-
-  print('Preparing vocab')
-  train_filename = args.data_dir + '/' + args.train_name + '.conll'
-  word_counts, form_vocab, w2i, pos, rels = utils.vocab(train_filename,
-      replicate_rnng=args.replicate_rnng_data)
-
-  utils.write_vocab(args.working_dir + '/vocab', word_counts)
   
+  # For training
+
+  working_path = args.working_dir + '/'
+  data_path = args.data_dir + '/' 
+  print('Preparing vocab')
+  vocab_path = Path(working_path + 'vocab')
+  if vocab_path.is_file():
+    #TODO read pos, rel vocab lists
+    conll_sentences, word_counts, form_vocab, w2i = utils.read_sentences_given_vocab(
+        data_path, args.train_name, working_path, replicate_rnng=args.replicate_rnng_data)
+  else:     
+    conll_sentences, word_counts, form_vocab, w2i, pos, rels = utils.read_sentences_create_vocab(
+        data_path, args.train_name, working_path, replicate_rnng=args.replicate_rnng_data)
+
+  # Read dev and test files with given vocab
+  conll_dev_sentences, _, _, _ = utils.read_sentences_given_vocab(
+        data_path, args.dev_name, working_path, replicate_rnng=args.replicate_rnng_data)
+
+  conll_test_sentences, _, _, _ = utils.read_sentences_given_vocab(
+        data_path, args.test_name, working_path, replicate_rnng=args.replicate_rnng_data)
 
 
 

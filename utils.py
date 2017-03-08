@@ -2,6 +2,7 @@
 # Code credit: Tensorflow seq2seq; BIST parser
 
 from collections import Counter
+from pathlib import Path
 import re
 
 # Stanford/Berkeley parser UNK processing case 5 (English specific).
@@ -116,14 +117,14 @@ def isProj(sentence):
 
   return len(forest.roots) == 1
 
-def vocab(conll_path, replicate_rnng=False): #TODO add argument include_singletons=False
+def read_sentences_create_vocab(conll_path, conll_name, working_path, replicate_rnng=False): #TODO add argument include_singletons=False
   wordsCount = Counter()
   posCount = Counter()
   relCount = Counter()
 
   conll_sentences = []
-  with open(conll_path, 'r') as conllFP:
-    for sentence in read_conll(conllFP, False, replicate_rnng):
+  with open(conll_path + conll_name + '.conll', 'r') as conllFP:
+    for sentence in read_conll(conllFP, False):
       conll_sentences.append(sentence)
       wordsCount.update([node.form for node in sentence])
       posCount.update([node.pos for node in sentence])
@@ -141,14 +142,44 @@ def vocab(conll_path, replicate_rnng=False): #TODO add argument include_singleto
         conll_sentences[i][j].norm = map_unk_class(node.form, j==1, form_vocab, replicate_rnng)
     wordsNormCount.update([node.norm for node in sentence])
     #wordsNormCount.update([node.norm for node in conll_sentences[i]])
+  
+  write_vocab(working_path + 'vocab', wordsNormCount)
+  write_text(working_path + conll_name + '.txt', conll_sentences)
 
-  return (wordsNormCount, 
+  return (conll_sentences,
+          wordsNormCount, 
           form_vocab,
           {w: i for i, w in enumerate(wordsNormCount.keys())},
           posCount.keys(), 
           relCount.keys())
 
-def read_conll(fh, proj, replicate_rnng=False):
+def read_sentences_given_vocab(conll_path, conll_name, working_path, replicate_rnng=False): 
+  wordsNormCount = read_vocab(working_path + 'vocab')
+  form_vocab = set(filter(lambda w: not w.startswith('UNK'), 
+                          wordsNormCount.keys()))
+
+  conll_sentences = []
+  with open(conll_path + conll_name + '.conll', 'r') as conllFP:
+    for sentence in read_conll(conllFP, False):
+      for j, node in enumerate(sentence):
+        if node.form not in form_vocab: 
+          sentence[j].norm = map_unk_class(node.form, j==1, form_vocab,
+                                           replicate_rnng)
+      conll_sentences.append(sentence)
+      
+  txt_filename = working_path + conll_name + '.txt'
+  txt_path = Path(txt_filename)
+  #if not txt_path.is_file():
+  write_text(txt_filename, conll_sentences)
+
+  return (conll_sentences,
+          wordsNormCount, 
+          form_vocab,
+          {w: i for i, w in enumerate(wordsNormCount.keys())})
+
+
+
+def read_conll(fh, proj):
   dropped = 0
   read = 0
   root = ConllEntry(0, '*root*', 'ROOT-POS', 'ROOT-CPOS', 0, 'rroot')
@@ -157,8 +188,7 @@ def read_conll(fh, proj, replicate_rnng=False):
     tok = line.strip().split()
     if not tok:
       if len(tokens)>1:
-        if ((not replicate_rnng or tokens[1].form != '#') # rnng interprets # as comment
-            and (not proj or isProj(tokens))):
+        if not proj or isProj(tokens):
           yield tokens
         else:
           print('Non-projective sentence dropped')
@@ -183,6 +213,23 @@ def write_conll(fn, conll_gen):
         fh.write('\t'.join([str(entry.id), entry.form, '_', entry.cpos, entry.pos, '_', str(entry.pred_parent_id), entry.pred_relation, '_', '_']))
         fh.write('\n')
       fh.write('\n')
+
+
+def write_text(fn, conll_gen):
+  with open(fn, 'w') as fh:
+    for sentence in conll_gen:
+      fh.write(' '.join([entry.norm for entry in sentence[1:]]) + '\n')
+
+
+def read_vocab(fn):
+  dic = {}
+  with open(fn, 'r') as fh:
+    for line in fh:
+      entry = line.strip().split(' ')
+      dic[entry[0]] = int(entry[1])
+  print('Read vocab of %d words.' % len(dic))
+  return Counter(dic)
+
 
 def write_vocab(fn, counts):
   with open(fn, 'w') as fh:
