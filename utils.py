@@ -1,9 +1,40 @@
 # Author: Jan Buys
-# Code credit: Tensorflow seq2seq; BIST parser
+# Code credit: Tensorflow seq2seq; BIST parser; pytorch master source
 
 from collections import Counter
 from pathlib import Path
 import re
+
+import torch
+
+def clip_grad_norm(parameters, max_norm, norm_type=2):
+    """Clips gradient norm of an iterable of parameters.
+    The norm is computed over all gradients together, as if they were
+    concatenated into a single vector. Gradients are modified in-place.
+    Arguments:
+        parameters (Iterable[Variable]): an iterable of Variables that will have
+            gradients normalized
+        max_norm (float or int): max norm of the gradients
+        norm_type (float or int): type of the used p-norm. Can be ``'inf'`` for infinity norm.
+    """
+    parameters = list(parameters)
+    max_norm = float(max_norm)
+    norm_type = float(norm_type)
+    if norm_type == float('inf'):
+        total_norm = max(p.grad.data.abs().max() for p in parameters)
+    else:
+        total_norm = 0
+        for p in parameters:
+            param_norm = p.grad.data.norm(norm_type)
+            total_norm += param_norm ** norm_type
+        total_norm = total_norm ** (1. / norm_type)
+    clip_coef = max_norm / (total_norm + 1e-6)
+    if clip_coef >= 1:
+        return
+    for p in parameters:
+        p.grad.data.mul_(clip_coef)
+
+
 
 # Stanford/Berkeley parser UNK processing case 5 (English specific).
 # Source class: edu.berkeley.nlp.PCFGLA.SimpleLexicon
@@ -140,16 +171,21 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path, replicate_
     for j, node in enumerate(sentence):
       if node.form in singletons:
         conll_sentences[i][j].norm = map_unk_class(node.form, j==1, form_vocab, replicate_rnng)
-    wordsNormCount.update([node.norm for node in sentence])
+    # Also add EOS to vocab
+    wordsNormCount.update([node.norm for node in sentence] + ['_EOS']) 
     #wordsNormCount.update([node.norm for node in conll_sentences[i]])
-  
+ 
+  norm_dict = {entry[0]: i for i, entry in enumerate(wordsNormCount.most_common())}
+  print('EOS id %d' % norm_dict['_EOS'])
+  tensor_sentences = extract_tensor_data(conll_sentences, norm_dict)
+
   write_vocab(working_path + 'vocab', wordsNormCount)
   write_text(working_path + conll_name + '.txt', conll_sentences)
 
   return (conll_sentences,
+          tensor_sentences,
           wordsNormCount, 
-          form_vocab,
-          {w: i for i, w in enumerate(wordsNormCount.keys())},
+          norm_dict, 
           posCount.keys(), 
           relCount.keys())
 
@@ -167,16 +203,18 @@ def read_sentences_given_vocab(conll_path, conll_name, working_path, replicate_r
                                            replicate_rnng)
       conll_sentences.append(sentence)
       
+  norm_dict = {entry[0]: i for i, entry in enumerate(wordsNormCount.most_common())}
+  tensor_sentences = extract_tensor_data(conll_sentences, norm_dict)
+
   txt_filename = working_path + conll_name + '.txt'
   txt_path = Path(txt_filename)
   #if not txt_path.is_file():
   write_text(txt_filename, conll_sentences)
 
   return (conll_sentences,
+          tensor_sentences,
           wordsNormCount, 
-          form_vocab,
-          {w: i for i, w in enumerate(wordsNormCount.keys())})
-
+          norm_dict)
 
 
 def read_conll(fh, proj):
@@ -205,6 +243,20 @@ def read_conll(fh, proj):
   print('%d dropped non-projective sentences.' % dropped)
   print('%d sentences read.' % read)
 
+# TODO make class ParseSentence, put tree and tensor and other nice things
+# inside, pass through sensible global parameters
+
+# For now just one tensor per sentence.
+def extract_tensor_data(conll_sentences, vocab): #TODO add option for data.cuda()
+  data = []
+  eos_id = vocab['_EOS']
+  for sent in conll_sentences:
+    tokens = [vocab[entry.norm] for entry in sent] 
+    tokens.append(eos_id)
+    ids = torch.LongTensor(tokens).view(-1, 1)
+    data.append(ids)
+  return data
+
 
 def write_conll(fn, conll_gen):
   with open(fn, 'w') as fh:
@@ -232,7 +284,10 @@ def read_vocab(fn):
 
 
 def write_vocab(fn, counts):
+  print(counts['_EOS'])
   with open(fn, 'w') as fh:
     for entry in counts.most_common():
+      if entry[0] == '_EOS':
+        print('EOS found')
       fh.write(entry[0] + ' ' + str(entry[1]) + '\n')
 
