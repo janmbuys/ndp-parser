@@ -13,7 +13,8 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 
-import rnn_model
+import rnn_lm
+import rnn_encoder
 import utils
 
 
@@ -112,7 +113,7 @@ if __name__=='__main__':
 
   def train_lm():
     # Build the model #TODO decide about naming of model
-    model = rnn_model.RNNModel(len(word_counts), args.embedding_size,
+    model = rnn_lm.RNNLM(len(word_counts), args.embedding_size,
       args.hidden_size, args.num_layers)
     #if args.cuda: #TODO 
     #  model.cuda()
