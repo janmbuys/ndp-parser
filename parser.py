@@ -23,6 +23,7 @@ def get_sentence_batch(source, evaluation=False):
     return data, target
 
 
+
 if __name__=='__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument('--data_dir', required=True,
@@ -105,78 +106,85 @@ if __name__=='__main__':
     tensor_sentences = tensor_sentences[:500]
     dev_tensor_sentences = dev_tensor_sentences[:100]
 
-  # Build the model #TODO decide about naming of model
-  model = rnn_model.RNNModel(len(word_counts), args.embedding_size,
-    args.hidden_size, args.num_layers)
-  #if args.cuda: #TODO 
-  #  model.cuda()
+  # Extract oracle sentences
+  for sent in conll_sentences[:5]:
+    actions, labels = utils.oracle(sent)
 
-  lr = args.lr
-  vocab_size = len(word_counts)
-  prev_val_loss = None
+  def train_lm():
+    # Build the model #TODO decide about naming of model
+    model = rnn_model.RNNModel(len(word_counts), args.embedding_size,
+      args.hidden_size, args.num_layers)
+    #if args.cuda: #TODO 
+    #  model.cuda()
 
-  criterion = nn.CrossEntropyLoss()
-  #optimizer = optim.Adam(model.parameters(), lr=lr) #TODO use
+    lr = args.lr
+    vocab_size = len(word_counts)
+    prev_val_loss = None
 
-  # Loop over epochs.
-  # Sentence iid, batch size 1 training.
-  batch_size = 1
-  for epoch in range(1, args.epochs+1):
-    epoch_start_time = time.time()
+    criterion = nn.CrossEntropyLoss()
+    #optimizer = optim.Adam(model.parameters(), lr=lr) #TODO use
 
-    total_loss = 0
-    for i, train_sent in enumerate(tensor_sentences):
-      # Training loop
-      start_time = time.time()
-      data, targets = get_sentence_batch(train_sent)
-      model.zero_grad()
-      hidden_state = model.init_hidden(batch_size)
-      output, hidden_state = model(data, hidden_state)
-      loss = criterion(output.view(-1, vocab_size), targets)
-      loss.backward()
+    # Loop over epochs.
+    # Sentence iid, batch size 1 training.
+    batch_size = 1
+    for epoch in range(1, args.epochs+1):
+      epoch_start_time = time.time()
 
-      utils.clip_grad_norm(model.parameters(), args.grad_clip)
-      #optimizer.step() 
-      for p in model.parameters():
-        p.data.add_(-lr, p.grad.data)
-      total_loss += loss.data
-
-      if i % args.logging_interval == 0 and i > 0:
-        cur_loss = total_loss[0] / args.logging_interval
-        elapsed = time.time() - start_time
-        print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.2f} | ms/batch {:5.2f} | '
-                'loss {:5.2f} | ppl {:8.2f}'.format(
-            epoch, i, len(tensor_sentences), lr,
-            elapsed * 1000 / args.logging_interval, cur_loss, 
-            math.exp(cur_loss)))
-        total_loss = 0
+      total_loss = 0
+      for i, train_sent in enumerate(tensor_sentences):
+        # Training loop
         start_time = time.time()
+        data, targets = get_sentence_batch(train_sent)
+        model.zero_grad()
+        hidden_state = model.init_hidden(batch_size)
+        output, hidden_state = model(data, hidden_state)
+        loss = criterion(output.view(-1, vocab_size), targets)
+        loss.backward()
 
-    # Evualate
-    val_batch_size = 1
-    total_loss = 0
-    for val_sent in dev_tensor_sentences:
-      hidden_state = model.init_hidden(val_batch_size)
-      data, targets = get_sentence_batch(val_sent, evaluation=True)
-      output, hidden_state = model(data, hidden_state)
-      output_flat = output.view(-1, vocab_size)
-      total_loss += len(data) * criterion(output_flat, targets).data
-    val_loss = total_loss[0] / len(dev_tensor_sentences)
+        utils.clip_grad_norm(model.parameters(), args.grad_clip)
+        #optimizer.step() 
+        for p in model.parameters():
+          p.data.add_(-lr, p.grad.data)
+        total_loss += loss.data
 
-    print('-' * 89)
-    print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
-            'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
-                                       val_loss, math.exp(val_loss)))
-    print('-' * 89)
-    # Anneal the learning rate.
-    if prev_val_loss and val_loss > prev_val_loss:
-      lr /= 4
-    prev_val_loss = val_loss
+        if i % args.logging_interval == 0 and i > 0:
+          cur_loss = total_loss[0] / args.logging_interval
+          elapsed = time.time() - start_time
+          print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.2f} | ms/batch {:5.2f} | '
+                  'loss {:5.2f} | ppl {:8.2f}'.format(
+              epoch, i, len(tensor_sentences), lr,
+              elapsed * 1000 / args.logging_interval, cur_loss, 
+              math.exp(cur_loss)))
+          total_loss = 0
+          start_time = time.time()
 
-    # save the model
-    if args.save_model != '':
-      model_fn = working_path + args.save_model
-      with open(model_fn, 'wb') as f:
-        torch.save(model, f)
+      # Evualate
+      val_batch_size = 1
+      total_loss = 0
+      total_length = 0
+      for val_sent in dev_tensor_sentences:
+        hidden_state = model.init_hidden(val_batch_size)
+        data, targets = get_sentence_batch(val_sent, evaluation=True)
+        output, hidden_state = model(data, hidden_state)
+        output_flat = output.view(-1, vocab_size)
+        total_loss += criterion(output_flat, targets).data
+        total_length += len(data)
+      val_loss = total_loss[0] / total_length
 
+      print('-' * 89)
+      print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
+              'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
+                                         val_loss, math.exp(val_loss)))
+      print('-' * 89)
+      # Anneal the learning rate.
+      if prev_val_loss and val_loss > prev_val_loss:
+        lr /= 4
+      prev_val_loss = val_loss
 
+      # save the model
+      if args.save_model != '':
+        model_fn = working_path + args.save_model
+        with open(model_fn, 'wb') as f:
+          torch.save(model, f)
+
+  train_lm()

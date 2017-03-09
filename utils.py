@@ -7,6 +7,34 @@ import re
 
 import torch
 
+_SH = 0
+_LA = 1
+_RA = 2
+
+class ParseForest:
+  def __init__(self, sentence):
+    self.roots = sentence
+
+    for root in self.roots:
+      root.children = []
+      root.scores = None
+      root.parent = None
+      root.pred_parent_id = 0 # None
+      root.pred_relation = 'rroot' # None
+      root.vecs = None
+      root.lstms = None
+
+  def __len__(self):
+    return len(self.roots)
+
+  def Attach(self, parent_index, child_index):
+    parent = self.roots[parent_index]
+    child = self.roots[child_index]
+
+    child.pred_parent_id = parent.id
+    del self.roots[child_index]
+
+
 def clip_grad_norm(parameters, max_norm, norm_type=2):
     """Clips gradient norm of an iterable of parameters.
     The norm is computed over all gradients together, as if they were
@@ -33,7 +61,6 @@ def clip_grad_norm(parameters, max_norm, norm_type=2):
         return
     for p in parameters:
         p.grad.data.mul_(clip_coef)
-
 
 
 # Stanford/Berkeley parser UNK processing case 5 (English specific).
@@ -96,6 +123,55 @@ def map_unk_class(word, is_sent_start, vocab, replicate_rnng=False):
   return unk_class
 
 
+def oracle(conll_sentence):
+  stack = ParseForest([])
+  buf = ParseForest([conll_sentence[0]])
+  buffer_index = 0
+  sent_length = len(conll_sentence)
+
+  num_children = [0 for _ in conll_sentence]
+  for token in conll_sentence:
+    num_children[token.parent_id] += 1
+
+  actions = []
+  labels = []
+
+  while buffer_index < sent_length or len(stack) > 1:
+    action = _SH
+    if buffer_index == sent_length:
+      action = _RA
+    elif len(stack) > 1: # allowed to ra or la
+      s0 = stack.roots[-1].id 
+      s1 = stack.roots[-2].id 
+      b = buf.roots[0].id 
+      if stack.roots[-1].parent_id == b: # candidate la
+        if len(stack.roots[-1].children) == num_children[s0]:
+          action = _LA 
+      elif stack.roots[-1].parent_id == s1: # candidate ra
+        if len(stack.roots[-1].children) == num_children[s0]:
+          action = _RA 
+    # excecute action
+    if action == _SH:
+      label = ''
+      stack.roots.append(buf.roots[0]) 
+      buffer_index += 1
+      if buffer_index == sent_length:
+        buf = ParseForest([])
+      else:
+        buf = ParseForest([conll_sentence[buffer_index]])
+    else:  
+      assert len(stack) > 0
+      label = stack.roots[-1].relation
+      child = stack.roots.pop()
+      if action == _LA:
+        buf.roots[0].children.append(child) 
+      else:
+        stack.roots[-1].children.append(child)
+    actions.append(action)
+    labels.append(label)
+  return actions, labels
+ 
+
 class ConllEntry:
   def __init__(self, id, form, pos, cpos, parent_id=None, relation=None):
     self.id = id
@@ -105,30 +181,6 @@ class ConllEntry:
     self.pos = pos.upper()
     self.parent_id = parent_id
     self.relation = relation
-
-
-class ParseForest:
-  def __init__(self, sentence):
-    self.roots = list(sentence)
-
-    for root in self.roots:
-      root.children = []
-      root.scores = None
-      root.parent = None
-      root.pred_parent_id = 0 # None
-      root.pred_relation = 'rroot' # None
-      root.vecs = None
-      root.lstms = None
-
-  def __len__(self):
-    return len(self.roots)
-
-  def Attach(self, parent_index, child_index):
-    parent = self.roots[parent_index]
-    child = self.roots[child_index]
-
-    child.pred_parent_id = parent.id
-    del self.roots[child_index]
 
 
 def isProj(sentence):
@@ -148,6 +200,7 @@ def isProj(sentence):
 
   return len(forest.roots) == 1
 
+
 def read_sentences_create_vocab(conll_path, conll_name, working_path, replicate_rnng=False): #TODO add argument include_singletons=False
   wordsCount = Counter()
   posCount = Counter()
@@ -155,7 +208,7 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path, replicate_
 
   conll_sentences = []
   with open(conll_path + conll_name + '.conll', 'r') as conllFP:
-    for sentence in read_conll(conllFP, False):
+    for sentence in read_conll(conllFP, False, replicate_rnng):
       conll_sentences.append(sentence)
       wordsCount.update([node.form for node in sentence])
       posCount.update([node.pos for node in sentence])
@@ -179,7 +232,9 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path, replicate_
   print('EOS id %d' % norm_dict['_EOS'])
   tensor_sentences = extract_tensor_data(conll_sentences, norm_dict)
 
-  write_vocab(working_path + 'vocab', wordsNormCount)
+  write_count_vocab(working_path + 'vocab', wordsNormCount)
+  write_vocab(working_path + 'pos.vocab', posCount.keys())
+  write_vocab(working_path + 'rel.vocab', relCount.keys())
   write_text(working_path + conll_name + '.txt', conll_sentences)
 
   return (conll_sentences,
@@ -189,6 +244,7 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path, replicate_
           posCount.keys(), 
           relCount.keys())
 
+
 def read_sentences_given_vocab(conll_path, conll_name, working_path, replicate_rnng=False): 
   wordsNormCount = read_vocab(working_path + 'vocab')
   form_vocab = set(filter(lambda w: not w.startswith('UNK'), 
@@ -196,7 +252,7 @@ def read_sentences_given_vocab(conll_path, conll_name, working_path, replicate_r
 
   conll_sentences = []
   with open(conll_path + conll_name + '.conll', 'r') as conllFP:
-    for sentence in read_conll(conllFP, False):
+    for sentence in read_conll(conllFP, False, replicate_rnng):
       for j, node in enumerate(sentence):
         if node.form not in form_vocab: 
           sentence[j].norm = map_unk_class(node.form, j==1, form_vocab,
@@ -217,7 +273,7 @@ def read_sentences_given_vocab(conll_path, conll_name, working_path, replicate_r
           norm_dict)
 
 
-def read_conll(fh, proj):
+def read_conll(fh, proj, replicate_rnng=False):
   dropped = 0
   read = 0
   root = ConllEntry(0, '*root*', 'ROOT-POS', 'ROOT-CPOS', 0, 'rroot')
@@ -226,7 +282,8 @@ def read_conll(fh, proj):
     tok = line.strip().split()
     if not tok:
       if len(tokens)>1:
-        if not proj or isProj(tokens):
+        if (not (replicate_rnng and tokens[0].form == '#') and
+            (not proj or isProj(tokens))):
           yield tokens
         else:
           print('Non-projective sentence dropped')
@@ -282,9 +339,12 @@ def read_vocab(fn):
   print('Read vocab of %d words.' % len(dic))
   return Counter(dic)
 
+def write_vocab(fn, words):
+  with open(fn, 'w') as fh:
+    for word in words:
+      fh.write(word + '\n')
 
-def write_vocab(fn, counts):
-  print(counts['_EOS'])
+def write_count_vocab(fn, counts):
   with open(fn, 'w') as fh:
     for entry in counts.most_common():
       if entry[0] == '_EOS':
