@@ -11,6 +11,18 @@ _SH = 0
 _LA = 1
 _RA = 2
 
+
+class ConllEntry:
+  def __init__(self, id, form, pos, cpos, parent_id=None, relation=None):
+    self.id = id
+    self.form = form
+    self.norm = form 
+    self.cpos = cpos.upper()
+    self.pos = pos.upper()
+    self.parent_id = parent_id
+    self.relation = relation
+
+
 class ParseForest:
   def __init__(self, sentence):
     self.roots = sentence
@@ -172,43 +184,43 @@ def oracle(conll_sentence):
   return actions, labels
  
 
-class ConllEntry:
-  def __init__(self, id, form, pos, cpos, parent_id=None, relation=None):
-    self.id = id
-    self.form = form
-    self.norm = form 
-    self.cpos = cpos.upper()
-    self.pos = pos.upper()
-    self.parent_id = parent_id
-    self.relation = relation
+def traverse_inorder(sentence, children, i):
+  """Find inorder traversal rooted at position i."""
+  #print(i)
+  k = 0
+  order = []
+  while k < len(children[i]) and children[i][k] < i:
+    order.extend(traverse_inorder(sentence, children, children[i][k]))
+    k += 1
+  order.append(i)
+  while k < len(children[i]):
+    order.extend(traverse_inorder(sentence, children, children[i][k]))
+    k += 1
+  return order
 
 
-def isProj(sentence):
-  forest = ParseForest(sentence)
-  unassigned = {entry.id: sum([1 for pentry in sentence if pentry.parent_id == entry.id]) for entry in sentence}
-
-  for _ in range(len(sentence)):
-    for i in range(len(forest.roots) - 1):
-      if forest.roots[i].parent_id == forest.roots[i+1].id and unassigned[forest.roots[i].id] == 0:
-        unassigned[forest.roots[i+1].id]-=1
-        forest.Attach(i+1, i)
-        break
-      if forest.roots[i+1].parent_id == forest.roots[i].id and unassigned[forest.roots[i+1].id] == 0:
-        unassigned[forest.roots[i].id]-=1
-        forest.Attach(i, i+1)
-        break
-
-  return len(forest.roots) == 1
+def isProjOrder(sentence):
+  children = [[] for _ in sentence]
+  for i in range(1, len(sentence)):
+    assert sentence[i].parent_id < len(sentence), sentence[i].parent_id
+    children[sentence[i].parent_id].append(i)
+  order = traverse_inorder(sentence, children, 0)
+  if order == list(range(len(sentence))):
+    return True, order
+  else:
+    return False, order
 
 
-def read_sentences_create_vocab(conll_path, conll_name, working_path, replicate_rnng=False): #TODO add argument include_singletons=False
+def read_sentences_create_vocab(conll_path, conll_name, working_path,
+    projectify=False, replicate_rnng=False): 
+    #TODO add argument include_singletons=False
   wordsCount = Counter()
   posCount = Counter()
   relCount = Counter()
 
   conll_sentences = []
   with open(conll_path + conll_name + '.conll', 'r') as conllFP:
-    for sentence in read_conll(conllFP, False, replicate_rnng):
+    for sentence in read_conll(conllFP, projectify, replicate_rnng):
       conll_sentences.append(sentence)
       wordsCount.update([node.form for node in sentence])
       posCount.update([node.pos for node in sentence])
@@ -245,14 +257,17 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path, replicate_
           relCount.keys())
 
 
-def read_sentences_given_vocab(conll_path, conll_name, working_path, replicate_rnng=False): 
+def read_sentences_given_vocab(conll_path, conll_name, working_path,
+    projectify=False, replicate_rnng=False): 
   wordsNormCount = read_vocab(working_path + 'vocab')
   form_vocab = set(filter(lambda w: not w.startswith('UNK'), 
                           wordsNormCount.keys()))
+  posCount = read_vocab(working_path + 'pos.vocab')
+  relCount = read_vocab(working_path + 'rel.vocab')
 
   conll_sentences = []
   with open(conll_path + conll_name + '.conll', 'r') as conllFP:
-    for sentence in read_conll(conllFP, False, replicate_rnng):
+    for sentence in read_conll(conllFP, projectify, replicate_rnng):
       for j, node in enumerate(sentence):
         if node.form not in form_vocab: 
           sentence[j].norm = map_unk_class(node.form, j==1, form_vocab,
@@ -270,10 +285,12 @@ def read_sentences_given_vocab(conll_path, conll_name, working_path, replicate_r
   return (conll_sentences,
           tensor_sentences,
           wordsNormCount, 
-          norm_dict)
+          norm_dict,
+          posCount.keys(), 
+          relCount.keys())
 
 
-def read_conll(fh, proj, replicate_rnng=False):
+def read_conll(fh, projectify, replicate_rnng=False):
   dropped = 0
   read = 0
   root = ConllEntry(0, '*root*', 'ROOT-POS', 'ROOT-CPOS', 0, 'rroot')
@@ -282,10 +299,27 @@ def read_conll(fh, proj, replicate_rnng=False):
     tok = line.strip().split()
     if not tok:
       if len(tokens)>1:
-        if (not (replicate_rnng and tokens[0].form == '#') and
-            (not proj or isProj(tokens))):
+        is_proj = True
+        if projectify:
+          is_proj, order = isProjOrder(tokens)
+          # Don't drop projective, modify to make projective
+          while not is_proj:
+            for i in range(1, len(order)):
+              if order[i] < order[i-1]: # reattach to grandparent
+                parent_id = tokens[order[i]].parent_id
+                grandparent_id = tokens[parent_id].parent_id
+                tokens[order[i]].parent_id = grandparent_id
+                break
+            is_proj, order = isProjOrder(tokens)
+            if not is_proj and grandparent_id == 0:
+              print("Cannot fix")
+              break
+
+        if (not (replicate_rnng and tokens[0].form == '#') and is_proj):
           yield tokens
         else:
+          #print(' '.join(toke.form for toke in tokens))
+          #print(' '.join(str(toke.parent_id) for toke in tokens))
           print('Non-projective sentence dropped')
           dropped += 1
         read += 1

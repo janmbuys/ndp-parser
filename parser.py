@@ -8,6 +8,7 @@ import sys
 import math
 import time
 from pathlib import Path
+from collections import defaultdict
 
 import torch
 import torch.nn as nn
@@ -90,22 +91,45 @@ if __name__=='__main__':
   if vocab_path.is_file() and not args.reset_vocab:
     #TODO read pos, rel vocab lists
     conll_sentences, tensor_sentences, word_counts, w2i = utils.read_sentences_given_vocab(
-        data_path, args.train_name, working_path, replicate_rnng=args.replicate_rnng_data)
+        data_path, args.train_name, working_path, True, replicate_rnng=args.replicate_rnng_data)
   else:     
     print('Preparing vocab')
     conll_sentences, tensor_sentences, word_counts, w2i, pos, rels = utils.read_sentences_create_vocab(
-        data_path, args.train_name, working_path, replicate_rnng=args.replicate_rnng_data)
+        data_path, args.train_name, working_path, True, replicate_rnng=args.replicate_rnng_data)
 
   # Read dev and test files with given vocab
   dev_conll_sentences, dev_tensor_sentences, _, _ = utils.read_sentences_given_vocab(
-        data_path, args.dev_name, working_path, replicate_rnng=args.replicate_rnng_data)
+        data_path, args.dev_name, working_path, False, replicate_rnng=args.replicate_rnng_data)
 
   test_conll_sentences, test_tensor_sentences, _, _ = utils.read_sentences_given_vocab(
-        data_path, args.test_name, working_path, replicate_rnng=args.replicate_rnng_data)
+        data_path, args.test_name, working_path, False, replicate_rnng=args.replicate_rnng_data)
 
   if args.small_data:
     tensor_sentences = tensor_sentences[:500]
     dev_tensor_sentences = dev_tensor_sentences[:100]
+
+  # Histogram of sentence length
+  token_count = 0
+  missing_token_count = 0
+
+  sent_length = defaultdict(int)
+  for sent in conll_sentences:
+    sent_length[len(sent)] += 1
+    token_count += len(sent)
+    missing_token_count += min(len(sent), 50)
+  lengths = list(sent_length.keys())
+  lengths.sort()
+  print('Token count %d. length 50 count %d prop %.4f.'
+        % (token_count, missing_token_count,
+            missing_token_count/token_count))
+
+  cum_count = 0
+  with open(working_path + 'histogram', 'w') as fh:
+    for length in lengths:
+      cum_count += sent_length[length]
+      fh.write((str(length) + '\t' + str(sent_length[length]) + '\t' 
+                + str(cum_count) + '\n'))
+  print('Created histogram')   
 
   # Extract oracle sentences
   for sent in conll_sentences[:5]:
