@@ -9,20 +9,147 @@ import math
 import time
 from pathlib import Path
 from collections import defaultdict
+import numpy as py
 
 import torch
 import torch.nn as nn
+import torch.optim as optim
 from torch.autograd import Variable
 
 import rnn_lm
 import rnn_encoder
+import classifier
 import utils
 
 
-def get_sentence_batch(source, evaluation=False):
+# Training oracle for single example
+def train_oracle(conll, encoder_features, transition_model):
+  stack = utils.ParseForest([])
+  buf = utils.ParseForest([conll[0]])
+  buffer_index = 0
+  sent_length = len(conll)
+
+  num_children = [0 for _ in conll]
+  for token in conll:
+    num_children[token.parent_id] += 1
+
+  actions = []
+  transition_logits = []
+  labels = []
+  num_examples = 0
+
+  while buffer_index < sent_length or len(stack) > 1:
+    transition_logit = None
+    action = utils._SH
+    if buffer_index == sent_length:
+      action = utils._RA
+    elif len(stack) > 1: # allowed to ra or la
+      s0 = stack.roots[-1].id 
+      s1 = stack.roots[-2].id 
+      b = buf.roots[0].id 
+      if stack.roots[-1].parent_id == b: # candidate la
+        if len(stack.roots[-1].children) == num_children[s0]:
+          action = utils._LA 
+      elif stack.roots[-1].parent_id == s1: # candidate ra
+        if len(stack.roots[-1].children) == num_children[s0]:
+          action = utils._RA 
+      if args.cuda:
+        feature_positions = Variable(torch.LongTensor([s0, s1, b])).cuda()
+      else:
+        feature_positions = Variable(torch.LongTensor([s0, s1, b]))
+
+      features = torch.index_select(encoder_features, 0, 
+                                    feature_positions)
+      transition_logit = transition_model(features)      
+
+    actions.append(action)
+    transition_logits.append(transition_logit)
+    label = '' if action == utils._SH else stack.roots[-1].relation
+    labels.append(label)
+
+    # excecute action
+    if action == utils._SH:
+      stack.roots.append(buf.roots[0]) 
+      buffer_index += 1
+      if buffer_index == sent_length:
+        buf = utils.ParseForest([])
+      else:
+        buf = utils.ParseForest([conll[buffer_index]])
+    else:  
+      assert len(stack) > 0
+      child = stack.roots.pop()
+      if action == utils._LA:
+        buf.roots[0].children.append(child) 
+      else:
+        stack.roots[-1].children.append(child)
+  return transition_logits, actions, labels
+
+
+def greedy_decode(conll, encoder_features, transition_model):
+  stack = utils.ParseForest([])
+  buf = utils.ParseForest([conll[0]])
+  buffer_index = 0
+  sent_length = len(conll)
+
+  actions = []
+  transition_logits = []
+  labels = [] #TODO
+  num_examples = 0
+
+  while buffer_index < sent_length or len(stack) > 1:
+    transition_logit = None
+    action = utils._SH
+    if buffer_index == sent_length:
+      action = utils._RA
+    elif len(stack) > 1: # allowed to ra or la
+      s0 = stack.roots[-1].id 
+      s1 = stack.roots[-2].id 
+      b = buf.roots[0].id 
+      
+      if args.cuda:
+        feature_positions = Variable(torch.LongTensor([s0, s1, b])).cuda()
+      else:
+        feature_positions = Variable(torch.LongTensor([s0, s1, b]))
+
+      features = torch.index_select(encoder_features, 0, 
+                                    feature_positions)
+      transition_logit = transition_model(features).type(torch.FloatTensor)    
+      transition_logit_numpy = transition_logit.type(torch.FloatTensor).data.numpy()
+      action = int(transition_logit_numpy.argmax(axis=1)[0])
+      
+    actions.append(action)
+    transition_logits.append(transition_logit)
+    #label = '' if action == utils._SH else label
+    #labels.append(label)
+
+    # excecute action
+    if action == utils._SH:
+      stack.roots.append(buf.roots[0]) 
+      buffer_index += 1
+      if buffer_index == sent_length:
+        buf = utils.ParseForest([])
+      else:
+        buf = utils.ParseForest([conll[buffer_index]])
+    else:  
+      assert len(stack) > 0
+      child = stack.roots.pop()
+      if action == utils._LA:
+        buf.roots[0].children.append(child) 
+        conll[child.id].pred_parent_id = buf.roots[0].id
+      else:
+        stack.roots[-1].children.append(child)
+        conll[child.id].pred_parent_id = stack.roots[-1].id
+  return conll, transition_logits, actions
+ 
+
+def get_sentence_batch(source, use_cuda, evaluation=False):
+  if use_cuda:
+    data = Variable(source.word_tensor[:-1], volatile=evaluation).cuda()
+    target = Variable(source.word_tensor[1:].view(-1)).cuda()
+  else:
     data = Variable(source.word_tensor[:-1], volatile=evaluation)
     target = Variable(source.word_tensor[1:].view(-1))
-    return data, target
+  return data, target
 
 
 def create_length_histogram(sentences):
@@ -102,7 +229,8 @@ if __name__=='__main__':
   args = parser.parse_args()
 
   torch.manual_seed(args.seed)
-  if torch.cuda.is_available() and args.cuda:
+  if args.cuda:
+    assert torch.cuda.is_available(), 'Cuda not available.'
     torch.cuda.manual_seed(args.seed)
 
   working_path = args.working_dir + '/'
@@ -134,11 +262,137 @@ if __name__=='__main__':
     sentences = sentences[:500]
     dev_sentences = dev_sentences[:100]
 
-  create_length_histogram(sentences)
+  #create_length_histogram(sentences)
 
   # Extract oracle sentences
-  for sent in sentences[:5]:
-    actions, labels = utils.oracle(sent.conll)
+  #for sent in sentences[:5]:
+  #  actions, labels = utils.oracle(sent.conll)
+
+  def train():
+    vocab_size = len(word_vocab)
+    num_relations = len(rel_vocab)
+    num_transitions = 3
+
+    batch_size = args.batch_size
+
+    # Build the model
+    encoder_model = rnn_encoder.RNNEncoder(vocab_size, 
+        args.embedding_size, args.hidden_size, args.num_layers, args.cuda)
+
+    feature_size = args.hidden_size # x2 for bidirectional
+    transition_model = classifier.Classifier(3, feature_size, 
+        args.hidden_size, num_transitions, args.cuda) 
+    relation_model = classifier.Classifier(3, feature_size, 
+        args.hidden_size, num_relations, args.cuda)
+
+    if args.cuda:
+      encoder_model.cuda()
+      transition_model.cuda()
+    criterion = nn.CrossEntropyLoss()
+    params = (list(encoder_model.parameters()) +
+              list(transition_model.parameters()))
+    optimizer = optim.Adam(params, lr=args.lr)
+    
+    prev_val_loss = None
+    for epoch in range(1, args.epochs+1):
+      epoch_start_time = time.time()
+      
+      #TODO randomize training order
+      
+      sentences.sort(key=len) #TODO short lengths might be causing a problem
+      #TODO batch for RNN encoder
+
+      total_loss = 0 
+
+      for i, train_sent in enumerate(sentences):
+        # Training loop
+        start_time = time.time()
+
+        # sentence encoder
+        sentence_data, _ = get_sentence_batch(train_sent, args.cuda)
+        encoder_model.zero_grad()
+        transition_model.zero_grad()
+        encoder_state = encoder_model.init_hidden(batch_size)
+        encoder_output = encoder_model(sentence_data, encoder_state)
+ 
+        transition_logits, actions, _ = train_oracle(train_sent.conll, 
+                encoder_output, transition_model)
+
+        # Filter out Nones to get training examples, then concatenate
+        transition_logits_filtered = [logit for logit in transition_logits
+                                      if logit is not None]
+        actions_filtered = [act for (logit, act) in zip(transition_logits, 
+                              actions) if logit is not None]
+        if args.cuda:
+          action_var = Variable(torch.LongTensor(actions_filtered)).cuda()
+        else:
+          action_var = Variable(torch.LongTensor(actions_filtered))
+
+        if transition_logits_filtered != []:
+          transition_output = torch.cat(transition_logits_filtered, 0)
+          loss = criterion(transition_output.view(-1, num_transitions),
+                           action_var)
+          loss.backward()
+          utils.clip_grad_norm(params, args.grad_clip)
+          optimizer.step() 
+          total_loss += loss.data
+ 
+        if i % args.logging_interval == 0 and i > 0:
+          cur_loss = total_loss[0] / args.logging_interval
+          elapsed = time.time() - start_time
+          print('| epoch {:3d} | {:5d}/{:5d} batches | ms/batch {:5.2f} | '
+                  'loss {:5.2f}'.format(  # | ppl {:8.2f}
+              epoch, i, len(sentences), 
+              elapsed * 1000 / args.logging_interval, cur_loss))
+              #math.exp(cur_loss)))
+          total_loss = 0
+          start_time = time.time()
+
+      val_batch_size = 1
+      total_loss = 0
+      total_length = 0
+      conll_predicted = []
+
+      for val_sent in dev_sentences:
+        sentence_data, _ = get_sentence_batch(val_sent, args.cuda, evaluation=True)
+        encoder_state = encoder_model.init_hidden(val_batch_size)
+        encoder_output = encoder_model(sentence_data, encoder_state)
+     
+        predict, transition_logits, actions = greedy_decode(val_sent.conll, 
+            encoder_output, transition_model)
+        conll_predicted.append(predict) 
+
+        # Filter out Nones, then concatenate
+        transition_logits_filtered = [logit for logit in transition_logits
+                                      if logit is not None]
+        actions_filtered = [act for (logit, act) in zip(transition_logits, 
+                              actions) if logit is not None]
+        if args.cuda:
+          action_var = Variable(torch.LongTensor(actions_filtered)).cuda()
+        else:
+          action_var = Variable(torch.LongTensor(actions_filtered))
+
+        if transition_logits_filtered != []:
+          transition_output = torch.cat(transition_logits_filtered, 0)
+          total_loss += criterion(transition_output.view(-1, num_transitions),
+                           action_var).data
+          total_length += 1
+
+      utils.write_conll(working_path + args.dev_name + '.' + str(epoch) + '.output.conll', conll_predicted)
+      val_loss = total_loss[0] / total_length
+      print('-' * 89)
+      print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '.format(
+          epoch, (time.time() - epoch_start_time), val_loss))
+            #'valid ppl {:8.2f}'
+      print('-' * 89)
+
+
+
+      # save the model
+      if args.save_model != '':
+        model_fn = working_path + args.save_model
+        with open(model_fn, 'wb') as f:
+          torch.save(model, f)
 
   def train_lm():
     lr = args.lr
@@ -147,9 +401,9 @@ if __name__=='__main__':
 
     # Build the model
     model = rnn_lm.RNNLM(vocab_size, args.embedding_size,
-      args.hidden_size, args.num_layers)
-    #if args.cuda: #TODO 
-    #  model.cuda()
+      args.hidden_size, args.num_layers, args.cuda)
+    if args.cuda:
+      model.cuda()
 
     criterion = nn.CrossEntropyLoss()
     #optimizer = optim.Adam(model.parameters(), lr=lr) #TODO use
@@ -164,7 +418,7 @@ if __name__=='__main__':
       for i, train_sent in enumerate(sentences):
         # Training loop
         start_time = time.time()
-        data, targets = get_sentence_batch(train_sent)
+        data, targets = get_sentence_batch(train_sent, args.cuda)
         model.zero_grad()
         hidden_state = model.init_hidden(batch_size)
         output, hidden_state = model(data, hidden_state)
@@ -194,7 +448,7 @@ if __name__=='__main__':
       total_length = 0
       for val_sent in dev_sentences:
         hidden_state = model.init_hidden(val_batch_size)
-        data, targets = get_sentence_batch(val_sent, evaluation=True)
+        data, targets = get_sentence_batch(val_sent, args.cuda, evaluation=True)
         output, hidden_state = model(data, hidden_state)
         output_flat = output.view(-1, vocab_size)
         total_loss += criterion(output_flat, targets).data
@@ -217,4 +471,4 @@ if __name__=='__main__':
         with open(model_fn, 'wb') as f:
           torch.save(model, f)
 
-  train_lm()
+  train()
