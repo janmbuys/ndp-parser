@@ -11,6 +11,7 @@ _SH = 0
 _LA = 1
 _RA = 2
 
+_EOS = 0
 
 class ConllEntry:
   def __init__(self, id, form, pos, cpos, parent_id=None, relation=None):
@@ -45,6 +46,86 @@ class ParseForest:
 
     child.pred_parent_id = parent.id
     del self.roots[child_index]
+
+
+class ParseSentence:
+  """Container class for single example."""
+  def __init__(self, conll, tokens):
+    self.conll = conll
+    self.word_tensor = torch.LongTensor(tokens).view(-1, 1)
+
+  def __len__(self):
+    return len(self.conll)
+
+  def text_line(self):
+    return ' '.join([entry.norm for entry in self.conll[1:]])
+
+
+class Vocab:
+  def __init__(self, word_list, counts=None):
+    self.words = word_list
+    self.dic = {word: i for i, word in enumerate(word_list)}
+    self.counts = counts
+
+  def __len__(self):
+    return len(self.words)
+
+  def get_word(self, i):
+    return self.words[i]
+
+  def get_id(self, word):
+    return self.dic[word]
+
+  def form_vocab(self):
+    return set(filter(lambda w: not w.startswith('UNK'), 
+                      self.words))
+
+  def write_vocab(self, fn):
+    with open(fn, 'w') as fh:
+      for word in self.words:
+        fh.write(word + '\n')
+
+  def write_count_vocab(self, fn, add_eos):
+    assert self.counts is not None
+    with open(fn, 'w') as fh:
+      for i, word in enumerate(self.words):
+        if i == 0 and add_eos:
+          fh.write(word + ' 0\n')
+        else:  
+          fh.write(word + ' ' + str(self.counts[word]) + '\n')
+
+  @classmethod
+  def from_counter(cls, counter, add_eos=False):
+    if add_eos:
+      word_list = ['_EOS']
+    else:
+      word_list = []
+    word_list.extend([entry[0] for entry in counter.most_common()])
+    return cls(word_list, counter)
+
+  @classmethod
+  def read_vocab(cls, fn):
+    with open(fn, 'r') as fh:
+      word_list = []
+      for line in fh:
+        entry = line.strip().split(' ')
+        word_list.append(entry[0])
+    return cls(word_list)
+
+  @classmethod
+  def read_count_vocab(cls, fn):
+    with open(fn, 'r') as fh:
+      word_list = []
+      dic = {}
+      for line in fh:
+        entry = line.strip().split(' ')
+        word_list.append(entry[0])
+        dic[entry[0]] = int(entry[1])
+    return cls(word_list, Counter(dic))
+
+
+def get_sentence_ids(conll, vocab):
+  return [vocab.get_id(entry.norm) for entry in conll] + [_EOS]
 
 
 def clip_grad_norm(parameters, max_norm, norm_type=2):
@@ -211,85 +292,6 @@ def isProjOrder(sentence):
     return False, order
 
 
-def read_sentences_create_vocab(conll_path, conll_name, working_path,
-    projectify=False, replicate_rnng=False): 
-    #TODO add argument include_singletons=False
-  wordsCount = Counter()
-  posCount = Counter()
-  relCount = Counter()
-
-  conll_sentences = []
-  with open(conll_path + conll_name + '.conll', 'r') as conllFP:
-    for sentence in read_conll(conllFP, projectify, replicate_rnng):
-      conll_sentences.append(sentence)
-      wordsCount.update([node.form for node in sentence])
-      posCount.update([node.pos for node in sentence])
-      relCount.update([node.relation for node in sentence])
-
-  # For words, replace singletons with Berkeley UNK classes
-  singletons = set(filter(lambda w: wordsCount[w] == 1, wordsCount.keys()))
-  print(str(len(singletons)) + ' singletons')
-  form_vocab = set(filter(lambda w: wordsCount[w] > 1, wordsCount.keys()))   
- 
-  wordsNormCount = Counter()
-  for i, sentence in enumerate(conll_sentences):
-    for j, node in enumerate(sentence):
-      if node.form in singletons:
-        conll_sentences[i][j].norm = map_unk_class(node.form, j==1, form_vocab, replicate_rnng)
-    # Also add EOS to vocab
-    wordsNormCount.update([node.norm for node in sentence] + ['_EOS']) 
-    #wordsNormCount.update([node.norm for node in conll_sentences[i]])
- 
-  norm_dict = {entry[0]: i for i, entry in enumerate(wordsNormCount.most_common())}
-  print('EOS id %d' % norm_dict['_EOS'])
-  tensor_sentences = extract_tensor_data(conll_sentences, norm_dict)
-
-  write_count_vocab(working_path + 'vocab', wordsNormCount)
-  write_vocab(working_path + 'pos.vocab', posCount.keys())
-  write_vocab(working_path + 'rel.vocab', relCount.keys())
-  write_text(working_path + conll_name + '.txt', conll_sentences)
-
-  return (conll_sentences,
-          tensor_sentences,
-          wordsNormCount, 
-          norm_dict, 
-          posCount.keys(), 
-          relCount.keys())
-
-
-def read_sentences_given_vocab(conll_path, conll_name, working_path,
-    projectify=False, replicate_rnng=False): 
-  wordsNormCount = read_vocab(working_path + 'vocab')
-  form_vocab = set(filter(lambda w: not w.startswith('UNK'), 
-                          wordsNormCount.keys()))
-  posCount = read_vocab(working_path + 'pos.vocab')
-  relCount = read_vocab(working_path + 'rel.vocab')
-
-  conll_sentences = []
-  with open(conll_path + conll_name + '.conll', 'r') as conllFP:
-    for sentence in read_conll(conllFP, projectify, replicate_rnng):
-      for j, node in enumerate(sentence):
-        if node.form not in form_vocab: 
-          sentence[j].norm = map_unk_class(node.form, j==1, form_vocab,
-                                           replicate_rnng)
-      conll_sentences.append(sentence)
-      
-  norm_dict = {entry[0]: i for i, entry in enumerate(wordsNormCount.most_common())}
-  tensor_sentences = extract_tensor_data(conll_sentences, norm_dict)
-
-  txt_filename = working_path + conll_name + '.txt'
-  txt_path = Path(txt_filename)
-  #if not txt_path.is_file():
-  write_text(txt_filename, conll_sentences)
-
-  return (conll_sentences,
-          tensor_sentences,
-          wordsNormCount, 
-          norm_dict,
-          posCount.keys(), 
-          relCount.keys())
-
-
 def read_conll(fh, projectify, replicate_rnng=False):
   dropped = 0
   read = 0
@@ -334,19 +336,80 @@ def read_conll(fh, projectify, replicate_rnng=False):
   print('%d dropped non-projective sentences.' % dropped)
   print('%d sentences read.' % read)
 
-# TODO make class ParseSentence, put tree and tensor and other nice things
-# inside, pass through sensible global parameters
 
-# For now just one tensor per sentence.
-def extract_tensor_data(conll_sentences, vocab): #TODO add option for data.cuda()
-  data = []
-  eos_id = vocab['_EOS']
-  for sent in conll_sentences:
-    tokens = [vocab[entry.norm] for entry in sent] 
-    tokens.append(eos_id)
-    ids = torch.LongTensor(tokens).view(-1, 1)
-    data.append(ids)
-  return data
+def read_sentences_create_vocab(conll_path, conll_name, working_path,
+    projectify=False, replicate_rnng=False): 
+    #TODO add argument include_singletons=False
+  wordsCount = Counter()
+  posCount = Counter()
+  relCount = Counter()
+
+  conll_sentences = []
+  with open(conll_path + conll_name + '.conll', 'r') as conllFP:
+    for sentence in read_conll(conllFP, projectify, replicate_rnng):
+      conll_sentences.append(sentence)
+      wordsCount.update([node.form for node in sentence])
+      posCount.update([node.pos for node in sentence])
+      relCount.update([node.relation for node in sentence])
+
+  # For words, replace singletons with Berkeley UNK classes
+  singletons = set(filter(lambda w: wordsCount[w] == 1, wordsCount.keys()))
+  print(str(len(singletons)) + ' singletons')
+  form_vocab = set(filter(lambda w: wordsCount[w] > 1, wordsCount.keys()))   
+ 
+  wordsNormCount = Counter()
+  for i, sentence in enumerate(conll_sentences):
+    for j, node in enumerate(sentence):
+      if node.form in singletons:
+        conll_sentences[i][j].norm = map_unk_class(node.form, j==1, 
+            form_vocab, replicate_rnng)
+    wordsNormCount.update([node.norm for node in conll_sentences[i]])
+                             
+  word_vocab = Vocab.from_counter(wordsNormCount, add_eos=True)
+  pos_vocab = Vocab.from_counter(posCount)
+  rel_vocab = Vocab.from_counter(relCount)
+
+  word_vocab.write_count_vocab(working_path + 'vocab', add_eos=True)
+  pos_vocab.write_vocab(working_path + 'pos.vocab')
+  rel_vocab.write_vocab(working_path + 'rel.vocab')
+
+  parse_sentences = [ParseSentence(sent, 
+        get_sentence_ids(sent, word_vocab)) for sent in conll_sentences] 
+  write_text(working_path + conll_name + '.txt', parse_sentences)
+
+  return (parse_sentences,
+          word_vocab,
+          pos_vocab,
+          rel_vocab)
+
+
+def read_sentences_given_vocab(conll_path, conll_name, working_path,
+    projectify=False, replicate_rnng=False): 
+  word_vocab = Vocab.read_count_vocab(working_path + 'vocab')
+  form_vocab = word_vocab.form_vocab()
+  pos_vocab = Vocab.read_vocab(working_path + 'pos.vocab')
+  rel_vocab = Vocab.read_vocab(working_path + 'rel.vocab')
+
+  sentences = []
+  with open(conll_path + conll_name + '.conll', 'r') as conllFP:
+    for sentence in read_conll(conllFP, projectify, replicate_rnng):
+      for j, node in enumerate(sentence):
+        if node.form not in form_vocab: 
+          sentence[j].norm = map_unk_class(node.form, j==1, form_vocab,
+                                           replicate_rnng)
+
+      sentences.append(ParseSentence(sentence, 
+          get_sentence_ids(sentence, word_vocab)))
+
+  txt_filename = working_path + conll_name + '.txt'
+  txt_path = Path(txt_filename)
+  if not txt_path.is_file():
+    write_text(txt_filename, sentences)
+
+  return (sentences,
+          word_vocab,
+          pos_vocab,
+          rel_vocab)
 
 
 def write_conll(fn, conll_gen):
@@ -358,30 +421,9 @@ def write_conll(fn, conll_gen):
       fh.write('\n')
 
 
-def write_text(fn, conll_gen):
+def write_text(fn, sentences):
   with open(fn, 'w') as fh:
-    for sentence in conll_gen:
-      fh.write(' '.join([entry.norm for entry in sentence[1:]]) + '\n')
+    for sentence in sentences:
+      fh.write(sentence.text_line() + '\n') 
 
-
-def read_vocab(fn):
-  dic = {}
-  with open(fn, 'r') as fh:
-    for line in fh:
-      entry = line.strip().split(' ')
-      dic[entry[0]] = int(entry[1])
-  print('Read vocab of %d words.' % len(dic))
-  return Counter(dic)
-
-def write_vocab(fn, words):
-  with open(fn, 'w') as fh:
-    for word in words:
-      fh.write(word + '\n')
-
-def write_count_vocab(fn, counts):
-  with open(fn, 'w') as fh:
-    for entry in counts.most_common():
-      if entry[0] == '_EOS':
-        print('EOS found')
-      fh.write(entry[0] + ' ' + str(entry[1]) + '\n')
 

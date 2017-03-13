@@ -20,10 +20,33 @@ import utils
 
 
 def get_sentence_batch(source, evaluation=False):
-    data = Variable(source[:-1], volatile=evaluation)
-    target = Variable(source[1:].view(-1))
+    data = Variable(source.word_tensor[:-1], volatile=evaluation)
+    target = Variable(source.word_tensor[1:].view(-1))
     return data, target
 
+
+def create_length_histogram(sentences):
+  token_count = 0
+  missing_token_count = 0
+
+  sent_length = defaultdict(int)
+  for sent in sentences:
+    sent_length[len(sent)] += 1
+    token_count += len(sent)
+    missing_token_count += min(len(sent), 50)
+  lengths = list(sent_length.keys())
+  lengths.sort()
+  print('Token count %d. length 50 count %d prop %.4f.'
+        % (token_count, missing_token_count,
+            missing_token_count/token_count))
+
+  cum_count = 0
+  with open(working_path + 'histogram', 'w') as fh:
+    for length in lengths:
+      cum_count += sent_length[length]
+      fh.write((str(length) + '\t' + str(sent_length[length]) + '\t' 
+                + str(cum_count) + '\n'))
+  print('Created histogram')   
 
 
 if __name__=='__main__':
@@ -89,74 +112,56 @@ if __name__=='__main__':
 
   vocab_path = Path(working_path + 'vocab')
   if vocab_path.is_file() and not args.reset_vocab:
-    #TODO read pos, rel vocab lists
-    conll_sentences, tensor_sentences, word_counts, w2i = utils.read_sentences_given_vocab(
-        data_path, args.train_name, working_path, True, replicate_rnng=args.replicate_rnng_data)
+    sentences, word_vocab, pos_vocab, rel_vocab = utils.read_sentences_given_vocab(
+        data_path, args.train_name, working_path, projectify=True, 
+        replicate_rnng=args.replicate_rnng_data)
   else:     
     print('Preparing vocab')
-    conll_sentences, tensor_sentences, word_counts, w2i, pos, rels = utils.read_sentences_create_vocab(
-        data_path, args.train_name, working_path, True, replicate_rnng=args.replicate_rnng_data)
+    sentences, word_vocab, pos_vocab, rel_vocab = utils.read_sentences_create_vocab(
+        data_path, args.train_name, working_path, projectify=True, 
+        replicate_rnng=args.replicate_rnng_data)
 
   # Read dev and test files with given vocab
-  dev_conll_sentences, dev_tensor_sentences, _, _ = utils.read_sentences_given_vocab(
-        data_path, args.dev_name, working_path, False, replicate_rnng=args.replicate_rnng_data)
+  dev_sentences, _, _, _ = utils.read_sentences_given_vocab(
+        data_path, args.dev_name, working_path, projectify=False, 
+        replicate_rnng=args.replicate_rnng_data)
 
-  test_conll_sentences, test_tensor_sentences, _, _ = utils.read_sentences_given_vocab(
-        data_path, args.test_name, working_path, False, replicate_rnng=args.replicate_rnng_data)
+  test_sentences, _,  _, _ = utils.read_sentences_given_vocab(
+        data_path, args.test_name, working_path, projectify=False, 
+        replicate_rnng=args.replicate_rnng_data)
 
   if args.small_data:
-    tensor_sentences = tensor_sentences[:500]
-    dev_tensor_sentences = dev_tensor_sentences[:100]
+    sentences = sentences[:500]
+    dev_sentences = dev_sentences[:100]
 
-  # Histogram of sentence length
-  token_count = 0
-  missing_token_count = 0
-
-  sent_length = defaultdict(int)
-  for sent in conll_sentences:
-    sent_length[len(sent)] += 1
-    token_count += len(sent)
-    missing_token_count += min(len(sent), 50)
-  lengths = list(sent_length.keys())
-  lengths.sort()
-  print('Token count %d. length 50 count %d prop %.4f.'
-        % (token_count, missing_token_count,
-            missing_token_count/token_count))
-
-  cum_count = 0
-  with open(working_path + 'histogram', 'w') as fh:
-    for length in lengths:
-      cum_count += sent_length[length]
-      fh.write((str(length) + '\t' + str(sent_length[length]) + '\t' 
-                + str(cum_count) + '\n'))
-  print('Created histogram')   
+  create_length_histogram(sentences)
 
   # Extract oracle sentences
-  for sent in conll_sentences[:5]:
-    actions, labels = utils.oracle(sent)
+  for sent in sentences[:5]:
+    actions, labels = utils.oracle(sent.conll)
 
   def train_lm():
-    # Build the model #TODO decide about naming of model
-    model = rnn_lm.RNNLM(len(word_counts), args.embedding_size,
+    lr = args.lr
+    vocab_size = len(word_vocab)
+    batch_size = 1
+
+    # Build the model
+    model = rnn_lm.RNNLM(vocab_size, args.embedding_size,
       args.hidden_size, args.num_layers)
     #if args.cuda: #TODO 
     #  model.cuda()
-
-    lr = args.lr
-    vocab_size = len(word_counts)
-    prev_val_loss = None
 
     criterion = nn.CrossEntropyLoss()
     #optimizer = optim.Adam(model.parameters(), lr=lr) #TODO use
 
     # Loop over epochs.
     # Sentence iid, batch size 1 training.
-    batch_size = 1
+    prev_val_loss = None
     for epoch in range(1, args.epochs+1):
       epoch_start_time = time.time()
 
       total_loss = 0
-      for i, train_sent in enumerate(tensor_sentences):
+      for i, train_sent in enumerate(sentences):
         # Training loop
         start_time = time.time()
         data, targets = get_sentence_batch(train_sent)
@@ -177,7 +182,7 @@ if __name__=='__main__':
           elapsed = time.time() - start_time
           print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.2f} | ms/batch {:5.2f} | '
                   'loss {:5.2f} | ppl {:8.2f}'.format(
-              epoch, i, len(tensor_sentences), lr,
+              epoch, i, len(sentences), lr,
               elapsed * 1000 / args.logging_interval, cur_loss, 
               math.exp(cur_loss)))
           total_loss = 0
@@ -187,7 +192,7 @@ if __name__=='__main__':
       val_batch_size = 1
       total_loss = 0
       total_length = 0
-      for val_sent in dev_tensor_sentences:
+      for val_sent in dev_sentences:
         hidden_state = model.init_hidden(val_batch_size)
         data, targets = get_sentence_batch(val_sent, evaluation=True)
         output, hidden_state = model(data, hidden_state)
