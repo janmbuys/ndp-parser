@@ -19,7 +19,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.autograd import Variable
 
-import rnn_lm
 import rnn_encoder
 import classifier
 import data_utils
@@ -180,22 +179,21 @@ def filter_logits(logits, targets):
 
 
 def get_sentence_batch(source, use_cuda, evaluation=False):
-  #TODO use target only for language modelling...
   if use_cuda:
     data = Variable(source.word_tensor[:-1], volatile=evaluation).cuda()
-    target = Variable(source.word_tensor[1:].view(-1)).cuda()
   else:
     data = Variable(source.word_tensor[:-1], volatile=evaluation)
-    target = Variable(source.word_tensor[1:].view(-1))
-  return data, target
+  return data
 
 
 if __name__=='__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument('--data_dir', required=True,
                       help='Directory of Annotated CONLL files')
+  parser.add_argument('--data_working_dir', required=True,
+                      help='Working directory for data files')
   parser.add_argument('--working_dir', required=True,
-                      help='Working directory for parser')
+                      help='Working directory for model output')
   parser.add_argument('--train_name',
                       help='Train file name (excluding .conll)',
                       default='train')
@@ -227,8 +225,6 @@ if __name__=='__main__':
                       help='upper epoch limit')
   parser.add_argument('--batch_size', type=int, default=1, metavar='N',
                       help='batch size') # original default 20
-  parser.add_argument('--bptt', type=int, default=20, # not using now
-                      help='sequence length')
 
   parser.add_argument('--relation_prediction', dest='predict_relations',
                       action='store_true', help='predict relation labels.')
@@ -256,29 +252,30 @@ if __name__=='__main__':
     assert torch.cuda.is_available(), 'Cuda not available.'
     torch.cuda.manual_seed(args.seed)
 
-  working_path = args.working_dir + '/'
   data_path = args.data_dir + '/' 
+  data_working_path = args.data_working_dir + '/'
+  working_path = args.working_dir + '/'
 
   # Prepare training data
 
-  vocab_path = Path(working_path + 'vocab')
+  vocab_path = Path(data_working_path + 'vocab')
   if vocab_path.is_file() and not args.reset_vocab:
     sentences, word_vocab, pos_vocab, rel_vocab = data_utils.read_sentences_given_vocab(
-        data_path, args.train_name, working_path, projectify=True, 
+        data_path, args.train_name, data_working_path, projectify=True, 
         replicate_rnng=args.replicate_rnng_data)
   else:     
     print('Preparing vocab')
     sentences, word_vocab, pos_vocab, rel_vocab = data_utils.read_sentences_create_vocab(
-        data_path, args.train_name, working_path, projectify=True, 
+        data_path, args.train_name, data_working_path, projectify=True, 
         replicate_rnng=args.replicate_rnng_data)
 
   # Read dev and test files with given vocab
   dev_sentences, _, _, _ = data_utils.read_sentences_given_vocab(
-        data_path, args.dev_name, working_path, projectify=False, 
+        data_path, args.dev_name, data_working_path, projectify=False, 
         replicate_rnng=args.replicate_rnng_data)
 
   test_sentences, _,  _, _ = data_utils.read_sentences_given_vocab(
-        data_path, args.test_name, working_path, projectify=False, 
+        data_path, args.test_name, data_working_path, projectify=False, 
         replicate_rnng=args.replicate_rnng_data)
 
   if args.small_data:
@@ -287,8 +284,8 @@ if __name__=='__main__':
 
   #data_utils.create_length_histogram(sentences)
 
-  # Extract oracle sentences
-  #for sent in sentences[:5]:
+  # Extract static oracle sequences
+  #for sent in sentences:
   #  actions, labels = data_utils.oracle(sent.conll)
 
   def train():
@@ -344,7 +341,7 @@ if __name__=='__main__':
         start_time = time.time()
 
         # sentence encoder
-        sentence_data, _ = get_sentence_batch(train_sent, args.cuda)
+        sentence_data = get_sentence_batch(train_sent, args.cuda)
         encoder_model.zero_grad()
         transition_model.zero_grad()
         if args.predict_relations:
@@ -359,6 +356,7 @@ if __name__=='__main__':
         transition_output, action_var = filter_logits(transition_logits,
             actions)
 
+        #TODO at least for generative model, think carefully about loss scaling
         if transition_output is not None:
           loss = criterion(transition_output.view(-1, num_transitions),
                            action_var)
@@ -368,7 +366,7 @@ if __name__=='__main__':
               loss += criterion(relation_output.view(-1, num_relations), label_var)
 
           loss.backward()
-          if agrs.grad_clip > 0:
+          if args.grad_clip > 0:
             nn_utils.clip_grad_norm(params, args.grad_clip)
           optimizer.step() 
           total_loss += loss.data
@@ -386,11 +384,10 @@ if __name__=='__main__':
 
       val_batch_size = 1
       total_loss = 0
-      total_length = 0
       conll_predicted = []
 
       for val_sent in dev_sentences:
-        sentence_data, _ = get_sentence_batch(val_sent, args.cuda, evaluation=True)
+        sentence_data = get_sentence_batch(val_sent, args.cuda, evaluation=True)
         encoder_state = encoder_model.init_hidden(val_batch_size)
         encoder_output = encoder_model(sentence_data, encoder_state)
      
@@ -398,25 +395,21 @@ if __name__=='__main__':
             val_sent.conll, encoder_output, transition_model, relation_model)
         conll_predicted.append(predict) 
 
-        # Filter out Nones, then concatenate
-        transition_logits_filtered = [logit for logit in transition_logits
-                                      if logit is not None]
-        actions_filtered = [act for (logit, act) in zip(transition_logits, 
-                              actions) if logit is not None]
-        if args.cuda:
-          action_var = Variable(torch.LongTensor(actions_filtered)).cuda()
-        else:
-          action_var = Variable(torch.LongTensor(actions_filtered))
+        # Filter out Nones to get training examples, then concatenate
+        transition_output, action_var = filter_logits(transition_logits,
+            actions)
 
-        if transition_logits_filtered != []:
-          transition_output = torch.cat(transition_logits_filtered, 0)
-          #total_loss += criterion(transition_output.view(-1, num_transitions),
-          #                        action_var).data
-          total_length += 1
+        if transition_output is not None:
+          total_loss += criterion(transition_output.view(-1, num_transitions),
+                                  action_var).data
+          if args.predict_relations:
+            relation_output, label_var = filter_logits(relation_logits, labels)
+            if relation_output is not None:
+              total_loss += criterion(relation_output.view(-1, num_relations),
+                                      label_var).data
 
       data_utils.write_conll(working_path + args.dev_name + '.' + str(epoch) + '.output.conll', conll_predicted)
-      val_loss = 0
-      #val_loss = total_loss[0] / total_length
+      val_loss = total_loss[0] / len(dev_sentences)
       print('-' * 89)
       print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '.format(
           epoch, (time.time() - epoch_start_time), val_loss))
@@ -431,82 +424,9 @@ if __name__=='__main__':
         model_fn = working_path + args.save_model + '_transition.pt'
         with open(model_fn, 'wb') as f:
           torch.save(transition_model, f)
-
-  def train_lm():
-    lr = args.lr
-    vocab_size = len(word_vocab)
-    batch_size = 1
-
-    # Build the model
-    model = rnn_lm.RNNLM(vocab_size, args.embedding_size,
-      args.hidden_size, args.num_layers, args.cuda)
-    if args.cuda:
-      model.cuda()
-
-    criterion = nn.CrossEntropyLoss()
-    #optimizer = optim.Adam(model.parameters(), lr=lr) #TODO use
-
-    # Loop over epochs.
-    # Sentence iid, batch size 1 training.
-    prev_val_loss = None
-    for epoch in range(1, args.epochs+1):
-      epoch_start_time = time.time()
-
-      total_loss = 0
-      for i, train_sent in enumerate(sentences):
-        # Training loop
-        start_time = time.time()
-        data, targets = get_sentence_batch(train_sent, args.cuda)
-        model.zero_grad()
-        hidden_state = model.init_hidden(batch_size)
-        output, hidden_state = model(data, hidden_state)
-        loss = criterion(output.view(-1, vocab_size), targets)
-        loss.backward()
-
-        data_utils.clip_grad_norm(model.parameters(), args.grad_clip)
-        #optimizer.step() 
-        for p in model.parameters():
-          p.data.add_(-lr, p.grad.data)
-        total_loss += loss.data
-
-        if i % args.logging_interval == 0 and i > 0:
-          cur_loss = total_loss[0] / args.logging_interval
-          elapsed = time.time() - start_time
-          print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.2f} | ms/batch {:5.2f} | '
-                  'loss {:5.2f} | ppl {:8.2f}'.format(
-              epoch, i, len(sentences), lr,
-              elapsed * 1000 / args.logging_interval, cur_loss, 
-              math.exp(cur_loss)))
-          total_loss = 0
-          start_time = time.time()
-
-      # Evualate
-      val_batch_size = 1
-      total_loss = 0
-      total_length = 0
-      for val_sent in dev_sentences:
-        hidden_state = model.init_hidden(val_batch_size)
-        data, targets = get_sentence_batch(val_sent, args.cuda, evaluation=True)
-        output, hidden_state = model(data, hidden_state)
-        output_flat = output.view(-1, vocab_size)
-        total_loss += criterion(output_flat, targets).data
-        total_length += len(data)
-      val_loss = total_loss[0] / total_length
-
-      print('-' * 89)
-      print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
-              'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
-                                         val_loss, math.exp(val_loss)))
-      print('-' * 89)
-      # Anneal the learning rate.
-      if prev_val_loss and val_loss > prev_val_loss:
-        lr /= 4
-      prev_val_loss = val_loss
-
-      # save the model
-      if args.save_model != '':
-        model_fn = working_path + args.save_model
-        with open(model_fn, 'wb') as f:
-          torch.save(model, f)
+        if relation_model is not None:
+          model_fn = working_path + args.save_model + '_relation.pt'
+          with open(model_fn, 'wb') as f:
+            torch.save(relation_model, f)
 
   train()
