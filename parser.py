@@ -242,11 +242,11 @@ if __name__=='__main__':
                       help='humber of hidden units per layer')
   parser.add_argument('--num_layers', type=int, default=1, # original 2
                       help='number of layers')
-  parser.add_argument('--lr', type=float, default=20, #TODO check
+  parser.add_argument('--lr', type=float, default=0.01, #TODO default 20 check
                       help='initial learning rate')
-  parser.add_argument('--grad_clip', type=float, default=0.5, #TODO check
+  parser.add_argument('--grad_clip', type=float, default=5, #TODO default 0.5 check
                       help='gradient clipping')
-  parser.add_argument('--epochs', type=int, default=10,
+  parser.add_argument('--epochs', type=int, default=100,
                       help='upper epoch limit')
   parser.add_argument('--batch_size', type=int, default=1, metavar='N',
                       help='batch size') # original default 20
