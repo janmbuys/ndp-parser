@@ -44,18 +44,21 @@ def train_oracle(conll, encoder_features, transition_model, relation_model=None)
     transition_logit = None
     relation_logit = None
     action = data_utils._SH
-    if buffer_index == sent_length:
-      action = data_utils._RA
-    elif len(stack) > 1: # allowed to ra or la
+    
+    if len(stack) > 1: # allowed to ra or la
       s0 = stack.roots[-1].id 
       s1 = stack.roots[-2].id 
-      b = buf.roots[0].id 
-      if stack.roots[-1].parent_id == b: # candidate la
-        if len(stack.roots[-1].children) == num_children[s0]:
-          action = data_utils._LA 
-      elif stack.roots[-1].parent_id == s1: # candidate ra
-        if len(stack.roots[-1].children) == num_children[s0]:
-          action = data_utils._RA 
+      if buffer_index == sent_length:
+        action = data_utils._RA
+        b = sent_length - 1 # last encoded word
+      else:
+        b = buf.roots[0].id # == buffer_index
+        if stack.roots[-1].parent_id == b: # candidate la
+          if len(stack.roots[-1].children) == num_children[s0]:
+            action = data_utils._LA 
+        elif stack.roots[-1].parent_id == s1: # candidate ra
+          if len(stack.roots[-1].children) == num_children[s0]:
+            action = data_utils._RA 
       if args.cuda:
         feature_positions = Variable(torch.LongTensor([s0, s1, b])).cuda()
       else:
@@ -107,29 +110,33 @@ def greedy_decode(conll, encoder_features, transition_model, relation_model=None
     transition_logit = None
     relation_logit = None
     action = data_utils._SH
-    label = ''
-    if buffer_index == sent_length:
-      action = data_utils._RA
-    elif len(stack) > 1: # allowed to ra or la
+    label = -1
+
+    if len(stack) > 1: # allowed to ra or la
       s0 = stack.roots[-1].id 
       s1 = stack.roots[-2].id 
-      b = buf.roots[0].id 
+      if buffer_index == sent_length:
+        b = sent_length - 1
+      else:
+        b = buf.roots[0].id 
       
       if args.cuda:
         feature_positions = Variable(torch.LongTensor([s0, s1, b])).cuda()
       else:
         feature_positions = Variable(torch.LongTensor([s0, s1, b]))
 
-      features = torch.index_select(encoder_features, 0, 
-                                    feature_positions)
+      features = torch.index_select(encoder_features, 0, feature_positions)
       #TODO rather score transition and relation jointly for greedy choice
       transition_logit = transition_model(features)
       transition_logit_np = transition_logit.type(torch.FloatTensor).data.numpy()
-      action = int(transition_logit_np.argmax(axis=1)[0])
+      if buffer_index == sent_length:
+        action = data_utils._RA
+      else:
+        action = int(transition_logit_np.argmax(axis=1)[0])
+      
       if relation_model is not None and action != data_utils._SH:
         relation_logit = relation_model(features)      
         relation_logit_np = relation_logit.type(torch.FloatTensor).data.numpy()
-
         label = int(relation_logit_np.argmax(axis=1)[0])
       
     actions.append(action)
@@ -156,7 +163,8 @@ def greedy_decode(conll, encoder_features, transition_model, relation_model=None
         stack.roots[-1].children.append(child)
         conll[child.id].pred_parent_id = stack.roots[-1].id
       if relation_model is not None:
-        conll[child.id].pred_relation_id = label
+        conll[child.id].pred_relation_ind = label
+  #print(labels)
   return conll, transition_logits, actions, relation_logits, labels
  
 
@@ -225,6 +233,8 @@ if __name__=='__main__':
                       help='upper epoch limit')
   parser.add_argument('--batch_size', type=int, default=1, metavar='N',
                       help='batch size') # original default 20
+  parser.add_argument('--dropout', type=float, default=0.0, 
+                      help='dropout rate')
 
   parser.add_argument('--relation_prediction', dest='predict_relations',
                       action='store_true', help='predict relation labels.')
@@ -298,7 +308,8 @@ if __name__=='__main__':
 
     # Build the model
     encoder_model = rnn_encoder.RNNEncoder(vocab_size, 
-        args.embedding_size, args.hidden_size, args.num_layers, args.cuda)
+        args.embedding_size, args.hidden_size, args.num_layers, args.dropout,
+        args.cuda)
 
     feature_size = args.hidden_size # x2 for bidirectional
     transition_model = classifier.Classifier(num_features, feature_size, 
@@ -335,6 +346,7 @@ if __name__=='__main__':
       #TODO batch for RNN encoder
 
       total_loss = 0 
+      encoder_model.train()
 
       for i, train_sent in enumerate(sentences):
         # Training loop
@@ -357,18 +369,21 @@ if __name__=='__main__':
             actions)
 
         #TODO at least for generative model, think carefully about loss scaling
+        loss = None
         if transition_output is not None:
           loss = criterion(transition_output.view(-1, num_transitions),
                            action_var)
-          if args.predict_relations:
-            relation_output, label_var = filter_logits(relation_logits, labels)
-            if relation_output is not None:
-              loss += criterion(relation_output.view(-1, num_relations), label_var)
+        if args.predict_relations:
+          relation_output, label_var = filter_logits(relation_logits, labels)
+          if relation_output is not None:
+            rel_loss = criterion(relation_output.view(-1, num_relations), label_var)
+            loss = loss + rel_loss if loss is not None else rel_loss
 
+        if loss is not None:
           loss.backward()
           if args.grad_clip > 0:
-            nn_utils.clip_grad_norm(params, args.grad_clip)
-          optimizer.step() 
+           nn_utils.clip_grad_norm(params, args.grad_clip)
+           optimizer.step() 
           total_loss += loss.data
  
         if i % args.logging_interval == 0 and i > 0:
@@ -386,6 +401,7 @@ if __name__=='__main__':
       total_loss = 0
       conll_predicted = []
 
+      encoder_model.eval()
       for val_sent in dev_sentences:
         sentence_data = get_sentence_batch(val_sent, args.cuda, evaluation=True)
         encoder_state = encoder_model.init_hidden(val_batch_size)
@@ -393,9 +409,14 @@ if __name__=='__main__':
      
         predict, transition_logits, actions, relation_logits, labels = greedy_decode(
             val_sent.conll, encoder_output, transition_model, relation_model)
+
+        for j, token in enumerate(predict):
+          # Convert labels to str
+          if j > 0 and relation_model is not None and token.pred_relation_ind >= 0:
+            predict[j].pred_relation = rel_vocab.get_word(token.pred_relation_ind)
         conll_predicted.append(predict) 
 
-        # Filter out Nones to get training examples, then concatenate
+        # Filter out Nones to get examples for loss, then concatenate
         transition_output, action_var = filter_logits(transition_logits,
             actions)
 

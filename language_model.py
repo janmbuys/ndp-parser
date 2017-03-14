@@ -68,6 +68,8 @@ if __name__=='__main__':
                       help='initial learning rate')
   parser.add_argument('--grad_clip', type=float, default=5, # default 0.5 check
                       help='gradient clipping')
+  parser.add_argument('--dropout', type=float, default=0.0, 
+                      help='dropout rate')
   parser.add_argument('--epochs', type=int, default=100,
                       help='upper epoch limit')
   parser.add_argument('--batch_size', type=int, default=1, metavar='N',
@@ -133,7 +135,7 @@ if __name__=='__main__':
 
     # Build the model
     model = rnn_lm.RNNLM(vocab_size, args.embedding_size,
-      args.hidden_size, args.num_layers, args.cuda)
+      args.hidden_size, args.num_layers, args.dropout, args.cuda)
     if args.cuda:
       model.cuda()
 
@@ -145,8 +147,9 @@ if __name__=='__main__':
     prev_val_loss = None
     for epoch in range(1, args.epochs+1):
       epoch_start_time = time.time()
-
+      model.train()
       total_loss = 0
+
       for i, train_sent in enumerate(sentences):
         # Training loop
         start_time = time.time()
@@ -179,6 +182,7 @@ if __name__=='__main__':
       val_batch_size = 1
       total_loss = 0
       total_length = 0
+      model.eval()
       for val_sent in dev_sentences:
         hidden_state = model.init_hidden(val_batch_size)
         data, targets = get_sentence_batch(val_sent, args.cuda, evaluation=True)

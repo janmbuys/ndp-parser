@@ -17,11 +17,12 @@ class Classifier(nn.Module):
 
     self.init_weights()
 
-  def init_weights(self): #TODO check 
+  def init_weights(self):
     initrange = 0.1
     self.encode.bias.data.fill_(0)
     self.encode.weight.data.uniform_(-initrange, initrange)
-    self.project.bias.data.fill_(0)
+    #nn.init.xavier_uniform(self.encode.weight)
+    self.project.bias.data.fill_(1)
     self.project.weight.data.uniform_(-initrange, initrange)
 
   def forward(self, features): # features dim: [num_features, 1, feature_size]

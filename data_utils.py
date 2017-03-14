@@ -34,6 +34,7 @@ class ParseForest:
       root.parent = None
       root.pred_parent_id = 0 # None
       root.pred_relation = 'rroot' # None
+      root.pred_relation_ind = -1
       root.vecs = None
       root.lstms = None
 
