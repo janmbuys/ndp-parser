@@ -50,7 +50,7 @@ class ParseForest:
 
 class ParseSentence:
   """Container class for single example."""
-  def __init__(self, conll, tokens):
+  def __init__(self, conll, tokens, relations=None):
     self.conll = conll
     self.word_tensor = torch.LongTensor(tokens).view(-1, 1)
 
@@ -60,6 +60,10 @@ class ParseSentence:
   def text_line(self):
     return ' '.join([entry.norm for entry in self.conll[1:]])
 
+  @classmethod
+  def from_vocab_conll(cls, conll, word_vocab):
+    tokens = [word_vocab.get_id(entry.norm) for entry in conll] + [_EOS]
+    return cls(conll, tokens)
 
 class Vocab:
   def __init__(self, word_list, counts=None):
@@ -122,10 +126,6 @@ class Vocab:
         word_list.append(entry[0])
         dic[entry[0]] = int(entry[1])
     return cls(word_list, Counter(dic))
-
-
-def get_sentence_ids(conll, vocab):
-  return [vocab.get_id(entry.norm) for entry in conll] + [_EOS]
 
 
 def clip_grad_norm(parameters, max_norm, norm_type=2):
@@ -373,8 +373,12 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path,
   pos_vocab.write_vocab(working_path + 'pos.vocab')
   rel_vocab.write_vocab(working_path + 'rel.vocab')
 
-  parse_sentences = [ParseSentence(sent, 
-        get_sentence_ids(sent, word_vocab)) for sent in conll_sentences] 
+  parse_sentences = []
+  for sent in conll_sentences:
+    for j, node in enumerate(sent): 
+      sent[j].relation_id = rel_vocab.get_id(node.relation) 
+    parse_sentences.append(ParseSentence.from_vocab_conll(sent, word_vocab))
+
   write_text(working_path + conll_name + '.txt', parse_sentences)
 
   return (parse_sentences,
@@ -397,9 +401,8 @@ def read_sentences_given_vocab(conll_path, conll_name, working_path,
         if node.form not in form_vocab: 
           sentence[j].norm = map_unk_class(node.form, j==1, form_vocab,
                                            replicate_rnng)
-
-      sentences.append(ParseSentence(sentence, 
-          get_sentence_ids(sentence, word_vocab)))
+        sentence[j].relation_id = rel_vocab.get_id(node.relation) 
+      sentences.append(ParseSentence.from_vocab_conll(sentence, word_vocab))
 
   txt_filename = working_path + conll_name + '.txt'
   txt_path = Path(txt_filename)

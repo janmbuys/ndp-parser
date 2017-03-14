@@ -3,12 +3,15 @@
 #              pytorch master source
 
 import argparse
-import os
-import sys
 import math
+import os
+import random
+import sys
 import time
-from pathlib import Path
+
 from collections import defaultdict
+from pathlib import Path
+
 import numpy as py
 
 import torch
@@ -21,9 +24,26 @@ import rnn_encoder
 import classifier
 import utils
 
+def filter_logits(logits, targets):
+  logits_filtered = [logit for logit in logits if logit is not None]
+  targets_filtered = [target for (logit, target) in zip(logits, targets)
+                          if logit is not None]
+  if logits_filtered:
+    if args.cuda:
+      #print(logits_filtered)
+      #print(targets_filtered)
+      target_var = Variable(torch.LongTensor(targets_filtered)).cuda()
+    else:
+      target_var = Variable(torch.LongTensor(targets_filtered))
+
+    output = torch.cat(logits_filtered, 0)
+    return output, target_var
+  else:
+    return None, None
+
 
 # Training oracle for single example
-def train_oracle(conll, encoder_features, transition_model):
+def train_oracle(conll, encoder_features, transition_model, relation_model=None):
   stack = utils.ParseForest([])
   buf = utils.ParseForest([conll[0]])
   buffer_index = 0
@@ -35,11 +55,12 @@ def train_oracle(conll, encoder_features, transition_model):
 
   actions = []
   transition_logits = []
+  relation_logits = []
   labels = []
-  num_examples = 0
 
   while buffer_index < sent_length or len(stack) > 1:
     transition_logit = None
+    relation_logit = None
     action = utils._SH
     if buffer_index == sent_length:
       action = utils._RA
@@ -61,10 +82,14 @@ def train_oracle(conll, encoder_features, transition_model):
       features = torch.index_select(encoder_features, 0, 
                                     feature_positions)
       transition_logit = transition_model(features)      
+      if relation_model is not None and action != utils._SH:
+        relation_logit = relation_model(features)      
 
     actions.append(action)
     transition_logits.append(transition_logit)
-    label = '' if action == utils._SH else stack.roots[-1].relation
+    relation_logits.append(relation_logit)
+     
+    label = -1 if action == utils._SH else stack.roots[-1].relation_id
     labels.append(label)
 
     # excecute action
@@ -82,23 +107,25 @@ def train_oracle(conll, encoder_features, transition_model):
         buf.roots[0].children.append(child) 
       else:
         stack.roots[-1].children.append(child)
-  return transition_logits, actions, labels
+  return transition_logits, actions, relation_logits, labels
 
 
-def greedy_decode(conll, encoder_features, transition_model):
+def greedy_decode(conll, encoder_features, transition_model, relation_model=None):
   stack = utils.ParseForest([])
   buf = utils.ParseForest([conll[0]])
   buffer_index = 0
   sent_length = len(conll)
 
   actions = []
+  labels = []
   transition_logits = []
-  labels = [] #TODO
-  num_examples = 0
+  relation_logits = []
 
   while buffer_index < sent_length or len(stack) > 1:
     transition_logit = None
+    relation_logit = None
     action = utils._SH
+    label = ''
     if buffer_index == sent_length:
       action = utils._RA
     elif len(stack) > 1: # allowed to ra or la
@@ -113,14 +140,21 @@ def greedy_decode(conll, encoder_features, transition_model):
 
       features = torch.index_select(encoder_features, 0, 
                                     feature_positions)
-      transition_logit = transition_model(features).type(torch.FloatTensor)    
-      transition_logit_numpy = transition_logit.type(torch.FloatTensor).data.numpy()
-      action = int(transition_logit_numpy.argmax(axis=1)[0])
+      #TODO rather score transition and relation jointly for greedy choice
+      transition_logit = transition_model(features)
+      transition_logit_np = transition_logit.type(torch.FloatTensor).data.numpy()
+      action = int(transition_logit_np.argmax(axis=1)[0])
+      if relation_model is not None and action != utils._SH:
+        relation_logit = relation_model(features)      
+        relation_logit_np = relation_logit.type(torch.FloatTensor).data.numpy()
+
+        label = int(relation_logit_np.argmax(axis=1)[0])
       
     actions.append(action)
     transition_logits.append(transition_logit)
-    #label = '' if action == utils._SH else label
-    #labels.append(label)
+    if relation_model is not None:
+      relation_logits.append(relation_logit)
+      labels.append(label)
 
     # excecute action
     if action == utils._SH:
@@ -139,10 +173,13 @@ def greedy_decode(conll, encoder_features, transition_model):
       else:
         stack.roots[-1].children.append(child)
         conll[child.id].pred_parent_id = stack.roots[-1].id
-  return conll, transition_logits, actions
+      if relation_model is not None:
+        conll[child.id].pred_relation_id = label
+  return conll, transition_logits, actions, relation_logits, labels
  
 
 def get_sentence_batch(source, use_cuda, evaluation=False):
+  #TODO use target only for language modelling...
   if use_cuda:
     data = Variable(source.word_tensor[:-1], volatile=evaluation).cuda()
     target = Variable(source.word_tensor[1:].view(-1)).cuda()
@@ -199,11 +236,11 @@ if __name__=='__main__':
   parser.add_argument('--reset_vocab', action='store_true', 
                       default=False)
 
-  parser.add_argument('--embedding_size', type=int, default=200,
+  parser.add_argument('--embedding_size', type=int, default=128,
                       help='size of word embeddings')
-  parser.add_argument('--hidden_size', type=int, default=200, 
+  parser.add_argument('--hidden_size', type=int, default=128, 
                       help='humber of hidden units per layer')
-  parser.add_argument('--num_layers', type=int, default=2, # make 1
+  parser.add_argument('--num_layers', type=int, default=1, # original 2
                       help='number of layers')
   parser.add_argument('--lr', type=float, default=20, #TODO check
                       help='initial learning rate')
@@ -215,10 +252,18 @@ if __name__=='__main__':
                       help='batch size') # original default 20
   parser.add_argument('--bptt', type=int, default=20, # not using now
                       help='sequence length')
-  parser.add_argument('--seed', type=int, default=1111,
-                      help='random seed')
+
+  parser.add_argument('--relation_prediction', dest='predict_relations',
+                      action='store_true', help='predict relation labels.')
+  parser.add_argument('--no_relation_prediction', dest='predict_relations',
+                      action='store_false', 
+                      help='do not predict relation labels.')
+  parser.set_defaults(predict_relations=True)
+
   parser.add_argument('--cuda', action='store_true',
                       help='use CUDA')
+  parser.add_argument('--seed', type=int, default=1111,
+                      help='random seed')
   parser.add_argument('--small_data', action='store_true',
                       help='use small version of dataset')
   parser.add_argument('--logging_interval', type=int, default=5000, 
@@ -229,6 +274,7 @@ if __name__=='__main__':
   args = parser.parse_args()
 
   torch.manual_seed(args.seed)
+  random.seed(args.seed)
   if args.cuda:
     assert torch.cuda.is_available(), 'Cuda not available.'
     torch.cuda.manual_seed(args.seed)
@@ -272,6 +318,7 @@ if __name__=='__main__':
     vocab_size = len(word_vocab)
     num_relations = len(rel_vocab)
     num_transitions = 3
+    num_features = 3
 
     batch_size = args.batch_size
 
@@ -280,26 +327,37 @@ if __name__=='__main__':
         args.embedding_size, args.hidden_size, args.num_layers, args.cuda)
 
     feature_size = args.hidden_size # x2 for bidirectional
-    transition_model = classifier.Classifier(3, feature_size, 
+    transition_model = classifier.Classifier(num_features, feature_size, 
         args.hidden_size, num_transitions, args.cuda) 
-    relation_model = classifier.Classifier(3, feature_size, 
-        args.hidden_size, num_relations, args.cuda)
+    if args.predict_relations:
+      relation_model = classifier.Classifier(num_features, feature_size, 
+          args.hidden_size, num_relations, args.cuda)
+    else:
+      relation_model = None
 
     if args.cuda:
       encoder_model.cuda()
       transition_model.cuda()
+      if args.predict_relations:
+        relation_model.cuda()
     criterion = nn.CrossEntropyLoss()
-    params = (list(encoder_model.parameters()) +
-              list(transition_model.parameters()))
+    if args.predict_relations:
+      params = (list(encoder_model.parameters()) +
+                list(transition_model.parameters()) +
+                list(relation_model.parameters()))
+    else:
+      params = (list(encoder_model.parameters()) +
+                list(transition_model.parameters()))
+
     optimizer = optim.Adam(params, lr=args.lr)
-    
+   
     prev_val_loss = None
     for epoch in range(1, args.epochs+1):
+      print('Start training epoch %d' % epoch)
       epoch_start_time = time.time()
       
-      #TODO randomize training order
-      
-      sentences.sort(key=len) #TODO short lengths might be causing a problem
+      random.shuffle(sentences)
+      sentences.sort(key=len) 
       #TODO batch for RNN encoder
 
       total_loss = 0 
@@ -312,26 +370,26 @@ if __name__=='__main__':
         sentence_data, _ = get_sentence_batch(train_sent, args.cuda)
         encoder_model.zero_grad()
         transition_model.zero_grad()
+        if args.predict_relations:
+          relation_model.zero_grad()
         encoder_state = encoder_model.init_hidden(batch_size)
         encoder_output = encoder_model(sentence_data, encoder_state)
  
-        transition_logits, actions, _ = train_oracle(train_sent.conll, 
-                encoder_output, transition_model)
+        transition_logits, actions, relation_logits, labels = train_oracle(train_sent.conll, 
+                encoder_output, transition_model, relation_model)
 
         # Filter out Nones to get training examples, then concatenate
-        transition_logits_filtered = [logit for logit in transition_logits
-                                      if logit is not None]
-        actions_filtered = [act for (logit, act) in zip(transition_logits, 
-                              actions) if logit is not None]
-        if args.cuda:
-          action_var = Variable(torch.LongTensor(actions_filtered)).cuda()
-        else:
-          action_var = Variable(torch.LongTensor(actions_filtered))
+        transition_output, action_var = filter_logits(transition_logits,
+            actions)
 
-        if transition_logits_filtered != []:
-          transition_output = torch.cat(transition_logits_filtered, 0)
+        if transition_output is not None:
           loss = criterion(transition_output.view(-1, num_transitions),
                            action_var)
+          if args.predict_relations:
+            relation_output, label_var = filter_logits(relation_logits, labels)
+            if relation_output is not None:
+              loss += criterion(relation_output.view(-1, num_relations), label_var)
+
           loss.backward()
           utils.clip_grad_norm(params, args.grad_clip)
           optimizer.step() 
@@ -358,8 +416,8 @@ if __name__=='__main__':
         encoder_state = encoder_model.init_hidden(val_batch_size)
         encoder_output = encoder_model(sentence_data, encoder_state)
      
-        predict, transition_logits, actions = greedy_decode(val_sent.conll, 
-            encoder_output, transition_model)
+        predict, transition_logits, actions, relation_logits, labels = greedy_decode(
+            val_sent.conll, encoder_output, transition_model, relation_model)
         conll_predicted.append(predict) 
 
         # Filter out Nones, then concatenate
@@ -374,25 +432,27 @@ if __name__=='__main__':
 
         if transition_logits_filtered != []:
           transition_output = torch.cat(transition_logits_filtered, 0)
-          total_loss += criterion(transition_output.view(-1, num_transitions),
-                           action_var).data
+          #total_loss += criterion(transition_output.view(-1, num_transitions),
+          #                        action_var).data
           total_length += 1
 
       utils.write_conll(working_path + args.dev_name + '.' + str(epoch) + '.output.conll', conll_predicted)
-      val_loss = total_loss[0] / total_length
+      val_loss = 0
+      #val_loss = total_loss[0] / total_length
       print('-' * 89)
       print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '.format(
           epoch, (time.time() - epoch_start_time), val_loss))
             #'valid ppl {:8.2f}'
       print('-' * 89)
 
-
-
       # save the model
       if args.save_model != '':
-        model_fn = working_path + args.save_model
+        model_fn = working_path + args.save_model + '_encoder.pt'
         with open(model_fn, 'wb') as f:
-          torch.save(model, f)
+          torch.save(encoder_model, f)
+        model_fn = working_path + args.save_model + '_transition.pt'
+        with open(model_fn, 'wb') as f:
+          torch.save(transition_model, f)
 
   def train_lm():
     lr = args.lr
