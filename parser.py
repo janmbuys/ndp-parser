@@ -25,7 +25,7 @@ import data_utils
 import nn_utils
 
 # Training oracle for single example
-def train_oracle(conll, encoder_features, transition_model, relation_model=None):
+def train_oracle(conll, encoder_features):
   stack = data_utils.ParseForest([])
   buf = data_utils.ParseForest([conll[0]])
   buffer_index = 0
@@ -36,15 +36,17 @@ def train_oracle(conll, encoder_features, transition_model, relation_model=None)
     num_children[token.parent_id] += 1
 
   actions = []
-  transition_logits = []
-  relation_logits = []
   labels = []
+  words = []
+  gen_features = []
+  features = []
 
   while buffer_index < sent_length or len(stack) > 1:
-    transition_logit = None
-    relation_logit = None
+    feature = None
     action = data_utils._SH
-    
+    b = 0
+    s0 = stack.roots[-1].id if len(stack) > 0 else 0
+
     if len(stack) > 1: # allowed to ra or la
       s0 = stack.roots[-1].id 
       s1 = stack.roots[-2].id 
@@ -59,23 +61,34 @@ def train_oracle(conll, encoder_features, transition_model, relation_model=None)
         elif stack.roots[-1].parent_id == s1: # candidate ra
           if len(stack.roots[-1].children) == num_children[s0]:
             action = data_utils._RA 
+
       if args.cuda:
         feature_positions = Variable(torch.LongTensor([s0, s1, b])).cuda()
       else:
         feature_positions = Variable(torch.LongTensor([s0, s1, b]))
+      feature = torch.index_select(encoder_features, 0, feature_positions)
 
-      features = torch.index_select(encoder_features, 0, 
-                                    feature_positions)
-      transition_logit = transition_model(features)      
-      if relation_model is not None and action != data_utils._SH:
-        relation_logit = relation_model(features)      
+    if args.cuda:
+      gen_feature_positions = Variable(torch.LongTensor([s0, b])).cuda()
+    else:
+      gen_feature_positions = Variable(torch.LongTensor([s0, b]))
+    gen_feature = torch.index_select(encoder_features, 0, gen_feature_positions)
 
     actions.append(action)
-    transition_logits.append(transition_logit)
-    relation_logits.append(relation_logit)
+    features.append(feature)
+    gen_features.append(gen_feature)
      
     label = -1 if action == data_utils._SH else stack.roots[-1].relation_id
+    if action == data_utils._SH:
+      if buffer_index+1 < sent_length:
+        word = conll[buffer_index+1].word_id
+      else:
+        word = data_utils._EOS
+    else:
+      word = -1
+        
     labels.append(label)
+    words.append(word)
 
     # excecute action
     if action == data_utils._SH:
@@ -92,7 +105,7 @@ def train_oracle(conll, encoder_features, transition_model, relation_model=None)
         buf.roots[0].children.append(child) 
       else:
         stack.roots[-1].children.append(child)
-  return transition_logits, actions, relation_logits, labels
+  return actions, words, labels, features, gen_features
 
 
 def greedy_decode(conll, encoder_features, transition_model, relation_model=None):
@@ -235,6 +248,10 @@ if __name__=='__main__':
                       help='batch size') # original default 20
   parser.add_argument('--dropout', type=float, default=0.0, 
                       help='dropout rate')
+  parser.add_argument('--bidirectional', action='store_true',
+                      help='use bidirectional encoder')
+  parser.add_argument('--generative', action='store_true',
+                      help='use generative parser')
 
   parser.add_argument('--relation_prediction', dest='predict_relations',
                       action='store_true', help='predict relation labels.')
@@ -255,6 +272,7 @@ if __name__=='__main__':
                       help='path to save the final model')
 
   args = parser.parse_args()
+  assert not (args.generative and args.bidirectional), 'Bidirectional encoder invalid for generative model.'
 
   torch.manual_seed(args.seed)
   random.seed(args.seed)
@@ -303,15 +321,18 @@ if __name__=='__main__':
     num_relations = len(rel_vocab)
     num_transitions = 3
     num_features = 3
+    num_gen_features = 2
 
     batch_size = args.batch_size
 
     # Build the model
     encoder_model = rnn_encoder.RNNEncoder(vocab_size, 
         args.embedding_size, args.hidden_size, args.num_layers, args.dropout,
-        args.cuda)
+        args.bidirectional, args.cuda)
 
-    feature_size = args.hidden_size # x2 for bidirectional
+    #TODO factorize features to work with dynamic program
+    feature_size = (args.hidden_size*2 if args.bidirectional 
+                    else args.hidden_size)
     transition_model = classifier.Classifier(num_features, feature_size, 
         args.hidden_size, num_transitions, args.cuda) 
     if args.predict_relations:
@@ -319,20 +340,25 @@ if __name__=='__main__':
           args.hidden_size, num_relations, args.cuda)
     else:
       relation_model = None
+    if args.generative:
+      word_model = classifier.Classifier(num_gen_features, feature_size,
+              args.hidden_size, vocab_size, args.cuda)
 
     if args.cuda:
       encoder_model.cuda()
       transition_model.cuda()
       if args.predict_relations:
         relation_model.cuda()
+      if args.generative:
+        word_model.cuda()
     criterion = nn.CrossEntropyLoss()
+
+    params = (list(encoder_model.parameters()) 
+              + list(transition_model.parameters()))
     if args.predict_relations:
-      params = (list(encoder_model.parameters()) +
-                list(transition_model.parameters()) +
-                list(relation_model.parameters()))
-    else:
-      params = (list(encoder_model.parameters()) +
-                list(transition_model.parameters()))
+      params += list(relation_model.parameters())
+    if args.generative:
+      params += list(word_model.parameters())
 
     optimizer = optim.Adam(params, lr=args.lr)
    
@@ -358,26 +384,56 @@ if __name__=='__main__':
         transition_model.zero_grad()
         if args.predict_relations:
           relation_model.zero_grad()
+        if args.generative:
+          word_model.zero_grad()
         encoder_state = encoder_model.init_hidden(batch_size)
         encoder_output = encoder_model(sentence_data, encoder_state)
- 
-        transition_logits, actions, relation_logits, labels = train_oracle(train_sent.conll, 
-                encoder_output, transition_model, relation_model)
 
-        # Filter out Nones to get training examples, then concatenate
+        actions, words, labels, features, gen_features = train_oracle(train_sent.conll, 
+                encoder_output)
+
+        #TODO next step in efficiency is to call classifier models after
+        # features are concatenated into single tensor, to increase ||
+        transition_logits = [transition_model(feat) if feat is not None
+                             else None for feat in features] 
+        # Filter out Nones and concatenate to get training examples
         transition_output, action_var = filter_logits(transition_logits,
             actions)
+        
+        if args.predict_relations:
+          relation_logits = []
+          for feat, action in zip(features, actions):
+            if action != data_utils._SH and feat is not None:
+              relation_logits.append(relation_model(feat))
+            else:
+              relation_logits.append(None)
 
-        #TODO at least for generative model, think carefully about loss scaling
+          relation_output, label_var = filter_logits(relation_logits, labels)
+
+        if args.generative:
+          gen_word_logits = []
+          for feat, action, word in zip(gen_features, actions, words):
+            if action == data_utils._SH:
+              assert word >= 0
+              gen_word_logits.append(word_model(feat))
+            else:
+              gen_word_logits.append(None)
+          gen_word_output, word_var = filter_logits(gen_word_logits, words)
+
+        # at least for generative model, think carefully about loss scaling
         loss = None
         if transition_output is not None:
           loss = criterion(transition_output.view(-1, num_transitions),
                            action_var)
-        if args.predict_relations:
-          relation_output, label_var = filter_logits(relation_logits, labels)
-          if relation_output is not None:
-            rel_loss = criterion(relation_output.view(-1, num_relations), label_var)
+        if args.predict_relations and relation_output is not None:
+            rel_loss = criterion(relation_output.view(-1, num_relations), 
+                                 label_var)
             loss = loss + rel_loss if loss is not None else rel_loss
+
+        if args.generative and gen_word_output is not None:
+            word_loss = criterion(gen_word_output.view(-1, vocab_size),
+                                  word_var)
+            loss = loss + word_loss if loss is not None else word_loss
 
         if loss is not None:
           loss.backward()
@@ -406,7 +462,8 @@ if __name__=='__main__':
         sentence_data = get_sentence_batch(val_sent, args.cuda, evaluation=True)
         encoder_state = encoder_model.init_hidden(val_batch_size)
         encoder_output = encoder_model(sentence_data, encoder_state)
-     
+    
+        #TODO evaluate word prediction for generative model
         predict, transition_logits, actions, relation_logits, labels = greedy_decode(
             val_sent.conll, encoder_output, transition_model, relation_model)
 
@@ -449,5 +506,8 @@ if __name__=='__main__':
           model_fn = working_path + args.save_model + '_relation.pt'
           with open(model_fn, 'wb') as f:
             torch.save(relation_model, f)
-
+        if word_model is not None:
+          model_fn = working_path + args.save_model + '_word.pt'
+          with open(model_fn, 'wb') as f:
+            torch.save(word_model, f)
   train()

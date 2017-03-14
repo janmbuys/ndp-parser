@@ -34,7 +34,7 @@ class ParseForest:
       root.parent = None
       root.pred_parent_id = 0 # None
       root.pred_relation = 'rroot' # None
-      root.pred_relation_ind = -1
+      root.pred_relation_id = -1
       root.vecs = None
       root.lstms = None
 
@@ -375,6 +375,7 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path,
   for sent in conll_sentences:
     for j, node in enumerate(sent): 
       sent[j].relation_id = rel_vocab.get_id(node.relation) 
+      sent[j].word_id = word_vocab.get_id(node.norm) 
     parse_sentences.append(ParseSentence.from_vocab_conll(sent, word_vocab))
 
   write_text(working_path + conll_name + '.txt', parse_sentences)
@@ -400,6 +401,7 @@ def read_sentences_given_vocab(conll_path, conll_name, working_path,
           sentence[j].norm = map_unk_class(node.form, j==1, form_vocab,
                                            replicate_rnng)
         sentence[j].relation_id = rel_vocab.get_id(node.relation) 
+        sentence[j].word_id = word_vocab.get_id(node.norm) 
       sentences.append(ParseSentence.from_vocab_conll(sentence, word_vocab))
 
   txt_filename = working_path + conll_name + '.txt'
