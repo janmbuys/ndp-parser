@@ -22,7 +22,144 @@ from torch.autograd import Variable
 import rnn_lm
 import rnn_encoder
 import classifier
-import utils
+import data_utils
+import nn_utils
+
+# Training oracle for single example
+def train_oracle(conll, encoder_features, transition_model, relation_model=None):
+  stack = data_utils.ParseForest([])
+  buf = data_utils.ParseForest([conll[0]])
+  buffer_index = 0
+  sent_length = len(conll)
+
+  num_children = [0 for _ in conll]
+  for token in conll:
+    num_children[token.parent_id] += 1
+
+  actions = []
+  transition_logits = []
+  relation_logits = []
+  labels = []
+
+  while buffer_index < sent_length or len(stack) > 1:
+    transition_logit = None
+    relation_logit = None
+    action = data_utils._SH
+    if buffer_index == sent_length:
+      action = data_utils._RA
+    elif len(stack) > 1: # allowed to ra or la
+      s0 = stack.roots[-1].id 
+      s1 = stack.roots[-2].id 
+      b = buf.roots[0].id 
+      if stack.roots[-1].parent_id == b: # candidate la
+        if len(stack.roots[-1].children) == num_children[s0]:
+          action = data_utils._LA 
+      elif stack.roots[-1].parent_id == s1: # candidate ra
+        if len(stack.roots[-1].children) == num_children[s0]:
+          action = data_utils._RA 
+      if args.cuda:
+        feature_positions = Variable(torch.LongTensor([s0, s1, b])).cuda()
+      else:
+        feature_positions = Variable(torch.LongTensor([s0, s1, b]))
+
+      features = torch.index_select(encoder_features, 0, 
+                                    feature_positions)
+      transition_logit = transition_model(features)      
+      if relation_model is not None and action != data_utils._SH:
+        relation_logit = relation_model(features)      
+
+    actions.append(action)
+    transition_logits.append(transition_logit)
+    relation_logits.append(relation_logit)
+     
+    label = -1 if action == data_utils._SH else stack.roots[-1].relation_id
+    labels.append(label)
+
+    # excecute action
+    if action == data_utils._SH:
+      stack.roots.append(buf.roots[0]) 
+      buffer_index += 1
+      if buffer_index == sent_length:
+        buf = data_utils.ParseForest([])
+      else:
+        buf = data_utils.ParseForest([conll[buffer_index]])
+    else:  
+      assert len(stack) > 0
+      child = stack.roots.pop()
+      if action == data_utils._LA:
+        buf.roots[0].children.append(child) 
+      else:
+        stack.roots[-1].children.append(child)
+  return transition_logits, actions, relation_logits, labels
+
+
+def greedy_decode(conll, encoder_features, transition_model, relation_model=None):
+  stack = data_utils.ParseForest([])
+  buf = data_utils.ParseForest([conll[0]])
+  buffer_index = 0
+  sent_length = len(conll)
+
+  actions = []
+  labels = []
+  transition_logits = []
+  relation_logits = []
+
+  while buffer_index < sent_length or len(stack) > 1:
+    transition_logit = None
+    relation_logit = None
+    action = data_utils._SH
+    label = ''
+    if buffer_index == sent_length:
+      action = data_utils._RA
+    elif len(stack) > 1: # allowed to ra or la
+      s0 = stack.roots[-1].id 
+      s1 = stack.roots[-2].id 
+      b = buf.roots[0].id 
+      
+      if args.cuda:
+        feature_positions = Variable(torch.LongTensor([s0, s1, b])).cuda()
+      else:
+        feature_positions = Variable(torch.LongTensor([s0, s1, b]))
+
+      features = torch.index_select(encoder_features, 0, 
+                                    feature_positions)
+      #TODO rather score transition and relation jointly for greedy choice
+      transition_logit = transition_model(features)
+      transition_logit_np = transition_logit.type(torch.FloatTensor).data.numpy()
+      action = int(transition_logit_np.argmax(axis=1)[0])
+      if relation_model is not None and action != data_utils._SH:
+        relation_logit = relation_model(features)      
+        relation_logit_np = relation_logit.type(torch.FloatTensor).data.numpy()
+
+        label = int(relation_logit_np.argmax(axis=1)[0])
+      
+    actions.append(action)
+    transition_logits.append(transition_logit)
+    if relation_model is not None:
+      relation_logits.append(relation_logit)
+      labels.append(label)
+
+    # excecute action
+    if action == data_utils._SH:
+      stack.roots.append(buf.roots[0]) 
+      buffer_index += 1
+      if buffer_index == sent_length:
+        buf = data_utils.ParseForest([])
+      else:
+        buf = data_utils.ParseForest([conll[buffer_index]])
+    else:  
+      assert len(stack) > 0
+      child = stack.roots.pop()
+      if action == data_utils._LA:
+        buf.roots[0].children.append(child) 
+        conll[child.id].pred_parent_id = buf.roots[0].id
+      else:
+        stack.roots[-1].children.append(child)
+        conll[child.id].pred_parent_id = stack.roots[-1].id
+      if relation_model is not None:
+        conll[child.id].pred_relation_id = label
+  return conll, transition_logits, actions, relation_logits, labels
+ 
 
 def filter_logits(logits, targets):
   logits_filtered = [logit for logit in logits if logit is not None]
@@ -42,142 +179,6 @@ def filter_logits(logits, targets):
     return None, None
 
 
-# Training oracle for single example
-def train_oracle(conll, encoder_features, transition_model, relation_model=None):
-  stack = utils.ParseForest([])
-  buf = utils.ParseForest([conll[0]])
-  buffer_index = 0
-  sent_length = len(conll)
-
-  num_children = [0 for _ in conll]
-  for token in conll:
-    num_children[token.parent_id] += 1
-
-  actions = []
-  transition_logits = []
-  relation_logits = []
-  labels = []
-
-  while buffer_index < sent_length or len(stack) > 1:
-    transition_logit = None
-    relation_logit = None
-    action = utils._SH
-    if buffer_index == sent_length:
-      action = utils._RA
-    elif len(stack) > 1: # allowed to ra or la
-      s0 = stack.roots[-1].id 
-      s1 = stack.roots[-2].id 
-      b = buf.roots[0].id 
-      if stack.roots[-1].parent_id == b: # candidate la
-        if len(stack.roots[-1].children) == num_children[s0]:
-          action = utils._LA 
-      elif stack.roots[-1].parent_id == s1: # candidate ra
-        if len(stack.roots[-1].children) == num_children[s0]:
-          action = utils._RA 
-      if args.cuda:
-        feature_positions = Variable(torch.LongTensor([s0, s1, b])).cuda()
-      else:
-        feature_positions = Variable(torch.LongTensor([s0, s1, b]))
-
-      features = torch.index_select(encoder_features, 0, 
-                                    feature_positions)
-      transition_logit = transition_model(features)      
-      if relation_model is not None and action != utils._SH:
-        relation_logit = relation_model(features)      
-
-    actions.append(action)
-    transition_logits.append(transition_logit)
-    relation_logits.append(relation_logit)
-     
-    label = -1 if action == utils._SH else stack.roots[-1].relation_id
-    labels.append(label)
-
-    # excecute action
-    if action == utils._SH:
-      stack.roots.append(buf.roots[0]) 
-      buffer_index += 1
-      if buffer_index == sent_length:
-        buf = utils.ParseForest([])
-      else:
-        buf = utils.ParseForest([conll[buffer_index]])
-    else:  
-      assert len(stack) > 0
-      child = stack.roots.pop()
-      if action == utils._LA:
-        buf.roots[0].children.append(child) 
-      else:
-        stack.roots[-1].children.append(child)
-  return transition_logits, actions, relation_logits, labels
-
-
-def greedy_decode(conll, encoder_features, transition_model, relation_model=None):
-  stack = utils.ParseForest([])
-  buf = utils.ParseForest([conll[0]])
-  buffer_index = 0
-  sent_length = len(conll)
-
-  actions = []
-  labels = []
-  transition_logits = []
-  relation_logits = []
-
-  while buffer_index < sent_length or len(stack) > 1:
-    transition_logit = None
-    relation_logit = None
-    action = utils._SH
-    label = ''
-    if buffer_index == sent_length:
-      action = utils._RA
-    elif len(stack) > 1: # allowed to ra or la
-      s0 = stack.roots[-1].id 
-      s1 = stack.roots[-2].id 
-      b = buf.roots[0].id 
-      
-      if args.cuda:
-        feature_positions = Variable(torch.LongTensor([s0, s1, b])).cuda()
-      else:
-        feature_positions = Variable(torch.LongTensor([s0, s1, b]))
-
-      features = torch.index_select(encoder_features, 0, 
-                                    feature_positions)
-      #TODO rather score transition and relation jointly for greedy choice
-      transition_logit = transition_model(features)
-      transition_logit_np = transition_logit.type(torch.FloatTensor).data.numpy()
-      action = int(transition_logit_np.argmax(axis=1)[0])
-      if relation_model is not None and action != utils._SH:
-        relation_logit = relation_model(features)      
-        relation_logit_np = relation_logit.type(torch.FloatTensor).data.numpy()
-
-        label = int(relation_logit_np.argmax(axis=1)[0])
-      
-    actions.append(action)
-    transition_logits.append(transition_logit)
-    if relation_model is not None:
-      relation_logits.append(relation_logit)
-      labels.append(label)
-
-    # excecute action
-    if action == utils._SH:
-      stack.roots.append(buf.roots[0]) 
-      buffer_index += 1
-      if buffer_index == sent_length:
-        buf = utils.ParseForest([])
-      else:
-        buf = utils.ParseForest([conll[buffer_index]])
-    else:  
-      assert len(stack) > 0
-      child = stack.roots.pop()
-      if action == utils._LA:
-        buf.roots[0].children.append(child) 
-        conll[child.id].pred_parent_id = buf.roots[0].id
-      else:
-        stack.roots[-1].children.append(child)
-        conll[child.id].pred_parent_id = stack.roots[-1].id
-      if relation_model is not None:
-        conll[child.id].pred_relation_id = label
-  return conll, transition_logits, actions, relation_logits, labels
- 
-
 def get_sentence_batch(source, use_cuda, evaluation=False):
   #TODO use target only for language modelling...
   if use_cuda:
@@ -187,30 +188,6 @@ def get_sentence_batch(source, use_cuda, evaluation=False):
     data = Variable(source.word_tensor[:-1], volatile=evaluation)
     target = Variable(source.word_tensor[1:].view(-1))
   return data, target
-
-
-def create_length_histogram(sentences):
-  token_count = 0
-  missing_token_count = 0
-
-  sent_length = defaultdict(int)
-  for sent in sentences:
-    sent_length[len(sent)] += 1
-    token_count += len(sent)
-    missing_token_count += min(len(sent), 50)
-  lengths = list(sent_length.keys())
-  lengths.sort()
-  print('Token count %d. length 50 count %d prop %.4f.'
-        % (token_count, missing_token_count,
-            missing_token_count/token_count))
-
-  cum_count = 0
-  with open(working_path + 'histogram', 'w') as fh:
-    for length in lengths:
-      cum_count += sent_length[length]
-      fh.write((str(length) + '\t' + str(sent_length[length]) + '\t' 
-                + str(cum_count) + '\n'))
-  print('Created histogram')   
 
 
 if __name__=='__main__':
@@ -242,9 +219,9 @@ if __name__=='__main__':
                       help='humber of hidden units per layer')
   parser.add_argument('--num_layers', type=int, default=1, # original 2
                       help='number of layers')
-  parser.add_argument('--lr', type=float, default=0.01, #TODO default 20 check
+  parser.add_argument('--lr', type=float, default=0.001, # default 20 check
                       help='initial learning rate')
-  parser.add_argument('--grad_clip', type=float, default=5, #TODO default 0.5 check
+  parser.add_argument('--grad_clip', type=float, default=5, # default 0.5 check
                       help='gradient clipping')
   parser.add_argument('--epochs', type=int, default=100,
                       help='upper epoch limit')
@@ -286,21 +263,21 @@ if __name__=='__main__':
 
   vocab_path = Path(working_path + 'vocab')
   if vocab_path.is_file() and not args.reset_vocab:
-    sentences, word_vocab, pos_vocab, rel_vocab = utils.read_sentences_given_vocab(
+    sentences, word_vocab, pos_vocab, rel_vocab = data_utils.read_sentences_given_vocab(
         data_path, args.train_name, working_path, projectify=True, 
         replicate_rnng=args.replicate_rnng_data)
   else:     
     print('Preparing vocab')
-    sentences, word_vocab, pos_vocab, rel_vocab = utils.read_sentences_create_vocab(
+    sentences, word_vocab, pos_vocab, rel_vocab = data_utils.read_sentences_create_vocab(
         data_path, args.train_name, working_path, projectify=True, 
         replicate_rnng=args.replicate_rnng_data)
 
   # Read dev and test files with given vocab
-  dev_sentences, _, _, _ = utils.read_sentences_given_vocab(
+  dev_sentences, _, _, _ = data_utils.read_sentences_given_vocab(
         data_path, args.dev_name, working_path, projectify=False, 
         replicate_rnng=args.replicate_rnng_data)
 
-  test_sentences, _,  _, _ = utils.read_sentences_given_vocab(
+  test_sentences, _,  _, _ = data_utils.read_sentences_given_vocab(
         data_path, args.test_name, working_path, projectify=False, 
         replicate_rnng=args.replicate_rnng_data)
 
@@ -308,11 +285,11 @@ if __name__=='__main__':
     sentences = sentences[:500]
     dev_sentences = dev_sentences[:100]
 
-  #create_length_histogram(sentences)
+  #data_utils.create_length_histogram(sentences)
 
   # Extract oracle sentences
   #for sent in sentences[:5]:
-  #  actions, labels = utils.oracle(sent.conll)
+  #  actions, labels = data_utils.oracle(sent.conll)
 
   def train():
     vocab_size = len(word_vocab)
@@ -391,7 +368,8 @@ if __name__=='__main__':
               loss += criterion(relation_output.view(-1, num_relations), label_var)
 
           loss.backward()
-          utils.clip_grad_norm(params, args.grad_clip)
+          if agrs.grad_clip > 0:
+            nn_utils.clip_grad_norm(params, args.grad_clip)
           optimizer.step() 
           total_loss += loss.data
  
@@ -436,7 +414,7 @@ if __name__=='__main__':
           #                        action_var).data
           total_length += 1
 
-      utils.write_conll(working_path + args.dev_name + '.' + str(epoch) + '.output.conll', conll_predicted)
+      data_utils.write_conll(working_path + args.dev_name + '.' + str(epoch) + '.output.conll', conll_predicted)
       val_loss = 0
       #val_loss = total_loss[0] / total_length
       print('-' * 89)
@@ -485,7 +463,7 @@ if __name__=='__main__':
         loss = criterion(output.view(-1, vocab_size), targets)
         loss.backward()
 
-        utils.clip_grad_norm(model.parameters(), args.grad_clip)
+        data_utils.clip_grad_norm(model.parameters(), args.grad_clip)
         #optimizer.step() 
         for p in model.parameters():
           p.data.add_(-lr, p.grad.data)

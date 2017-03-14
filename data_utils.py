@@ -128,32 +128,28 @@ class Vocab:
     return cls(word_list, Counter(dic))
 
 
-def clip_grad_norm(parameters, max_norm, norm_type=2):
-    """Clips gradient norm of an iterable of parameters.
-    The norm is computed over all gradients together, as if they were
-    concatenated into a single vector. Gradients are modified in-place.
-    Arguments:
-        parameters (Iterable[Variable]): an iterable of Variables that will have
-            gradients normalized
-        max_norm (float or int): max norm of the gradients
-        norm_type (float or int): type of the used p-norm. Can be ``'inf'`` for infinity norm.
-    """
-    parameters = list(parameters)
-    max_norm = float(max_norm)
-    norm_type = float(norm_type)
-    if norm_type == float('inf'):
-        total_norm = max(p.grad.data.abs().max() for p in parameters)
-    else:
-        total_norm = 0
-        for p in parameters:
-            param_norm = p.grad.data.norm(norm_type)
-            total_norm += param_norm ** norm_type
-        total_norm = total_norm ** (1. / norm_type)
-    clip_coef = max_norm / (total_norm + 1e-6)
-    if clip_coef >= 1:
-        return
-    for p in parameters:
-        p.grad.data.mul_(clip_coef)
+def create_length_histogram(sentences):
+  token_count = 0
+  missing_token_count = 0
+
+  sent_length = defaultdict(int)
+  for sent in sentences:
+    sent_length[len(sent)] += 1
+    token_count += len(sent)
+    missing_token_count += min(len(sent), 50)
+  lengths = list(sent_length.keys())
+  lengths.sort()
+  print('Token count %d. length 50 count %d prop %.4f.'
+        % (token_count, missing_token_count,
+            missing_token_count/token_count))
+
+  cum_count = 0
+  with open(working_path + 'histogram', 'w') as fh:
+    for length in lengths:
+      cum_count += sent_length[length]
+      fh.write((str(length) + '\t' + str(sent_length[length]) + '\t' 
+                + str(cum_count) + '\n'))
+  print('Created histogram')   
 
 
 # Stanford/Berkeley parser UNK processing case 5 (English specific).
@@ -216,7 +212,8 @@ def map_unk_class(word, is_sent_start, vocab, replicate_rnng=False):
   return unk_class
 
 
-def oracle(conll_sentence):
+def static_oracle(conll_sentence):
+  # Keep for reference
   stack = ParseForest([])
   buf = ParseForest([conll_sentence[0]])
   buffer_index = 0
