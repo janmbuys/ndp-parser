@@ -506,7 +506,7 @@ if __name__=='__main__':
           model_fn = working_path + args.save_model + '_relation.pt'
           with open(model_fn, 'wb') as f:
             torch.save(relation_model, f)
-        if word_model is not None:
+        if args.generative:
           model_fn = working_path + args.save_model + '_word.pt'
           with open(model_fn, 'wb') as f:
             torch.save(word_model, f)
