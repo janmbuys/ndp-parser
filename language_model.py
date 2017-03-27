@@ -147,6 +147,7 @@ if __name__=='__main__':
     prev_val_loss = None
     for epoch in range(1, args.epochs+1):
       epoch_start_time = time.time()
+      random.shuffle(sentences)
       model.train()
       total_loss = 0
 

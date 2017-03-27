@@ -12,7 +12,7 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-import numpy as py
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -21,6 +21,7 @@ from torch.autograd import Variable
 
 import rnn_encoder
 import classifier
+import binary_classifier
 import data_utils
 import nn_utils
 
@@ -108,7 +109,8 @@ def train_oracle(conll, encoder_features):
   return actions, words, labels, features, gen_features
 
 
-def greedy_decode(conll, encoder_features, transition_model, relation_model=None):
+def greedy_decode(conll, encoder_features, transition_model,
+        relation_model=None, direction_model=None):
   stack = data_utils.ParseForest([])
   buf = data_utils.ParseForest([conll[0]])
   buffer_index = 0
@@ -117,11 +119,14 @@ def greedy_decode(conll, encoder_features, transition_model, relation_model=None
   actions = []
   labels = []
   transition_logits = []
+  direction_logits = []
   relation_logits = []
+  normalize = nn.Sigmoid()
 
   while buffer_index < sent_length or len(stack) > 1:
     transition_logit = None
     relation_logit = None
+    direction_logit = None
     action = data_utils._SH
     label = -1
 
@@ -137,15 +142,47 @@ def greedy_decode(conll, encoder_features, transition_model, relation_model=None
         feature_positions = Variable(torch.LongTensor([s0, s1, b])).cuda()
       else:
         feature_positions = Variable(torch.LongTensor([s0, s1, b]))
-
       features = torch.index_select(encoder_features, 0, feature_positions)
-      #TODO rather score transition and relation jointly for greedy choice
-      transition_logit = transition_model(features)
-      transition_logit_np = transition_logit.type(torch.FloatTensor).data.numpy()
-      if buffer_index == sent_length:
-        action = data_utils._RA
+
+      if args.cuda:
+        gen_feature_positions = Variable(torch.LongTensor([s0, b])).cuda()
       else:
-        action = int(transition_logit_np.argmax(axis=1)[0])
+        gen_feature_positions = Variable(torch.LongTensor([s0, b]))
+      gen_features = torch.index_select(encoder_features, 0, gen_feature_positions)
+
+      #TODO rather score transition and relation jointly for greedy choice
+
+      if direction_model is not None: # find action from decomposed 
+        transition_logit = transition_model(gen_features)
+        if buffer_index == sent_length:
+          sh_action = data_utils._SRE 
+        else: #TODO check, but instead of sigmoid can just test > 0
+          transition_sigmoid = normalize(transition_logit)
+          transition_sigmoid_np = transition_sigmoid.type(torch.FloatTensor).data.numpy()
+          sh_action = int(np.round(transition_sigmoid_np)[0])
+        if sh_action == data_utils._SRE:
+          direction_logit = direction_model(features)  
+          direction_sigmoid = normalize(direction_logit)
+          direction_sigmoid_np = direction_sigmoid.type(torch.FloatTensor).data.numpy()
+          if buffer_index == sent_length:
+            direc = data_utils._DRA
+          else:
+            direc = int(np.round(direction_sigmoid_np)[0])
+          if direc == data_utils._DLA:
+            action = data_utils._LA
+          else:
+            action = data_utils._RA
+          direction_logits.append(direction_logit)
+        else:
+          action = data_utils._SH
+          direction_logits.append(None)
+      else:
+        transition_logit = transition_model(features)
+        transition_logit_np = transition_logit.type(torch.FloatTensor).data.numpy()
+        if buffer_index == sent_length:
+          action = data_utils._RA
+        else:
+          action = int(transition_logit_np.argmax(axis=1)[0])
       
       if relation_model is not None and action != data_utils._SH:
         relation_logit = relation_model(features)      
@@ -178,25 +215,58 @@ def greedy_decode(conll, encoder_features, transition_model, relation_model=None
       if relation_model is not None:
         conll[child.id].pred_relation_ind = label
   #print(labels)
-  return conll, transition_logits, actions, relation_logits, labels
+  return conll, transition_logits, direction_logits, actions, relation_logits, labels
  
 
-def filter_logits(logits, targets):
-  logits_filtered = [logit for logit in logits if logit is not None]
-  targets_filtered = [target for (logit, target) in zip(logits, targets)
-                          if logit is not None]
+def filter_logits(logits, targets, float_var=False):
+  logits_filtered = []
+  targets_filtered = []
+  for logit, target in zip(logits, targets):
+    # this should handle the case where not direction logits 
+    # should be predicted
+    if logit is not None and target is not None: 
+      logits_filtered.append(logit)
+      targets_filtered.append(target)
+
+  #logits_filtered = [logit for logit in logits if logit is not None]
+  #targets_filtered = [target for (logit, target) in zip(logits, targets)
+  #                        if logit is not None]
+
   if logits_filtered:
     if args.cuda:
       #print(logits_filtered)
       #print(targets_filtered)
-      target_var = Variable(torch.LongTensor(targets_filtered)).cuda()
+      if float_var:
+        target_var = Variable(torch.FloatTensor(targets_filtered)).cuda()
+      else:  
+        target_var = Variable(torch.LongTensor(targets_filtered)).cuda()
     else:
-      target_var = Variable(torch.LongTensor(targets_filtered))
+      if float_var:
+        target_var = Variable(torch.FloatTensor(targets_filtered))
+      else:
+        target_var = Variable(torch.LongTensor(targets_filtered))
 
     output = torch.cat(logits_filtered, 0)
     return output, target_var
   else:
     return None, None
+
+def decompose_transitions(actions):
+  stackops = []
+  directions = []
+  
+  for action in actions:
+    if action == data_utils._SH:
+      stackops.append(data_utils._SSH)
+      directions.append(None)
+    else:
+      stackops.append(data_utils._SRE)
+      if action == data_utils._LA:
+        directions.append(data_utils._DLA)
+      else:  
+        directions.append(data_utils._DRA)
+  
+  return stackops, directions
 
 
 def get_sentence_batch(source, use_cuda, evaluation=False):
@@ -252,6 +322,8 @@ if __name__=='__main__':
                       help='use bidirectional encoder')
   parser.add_argument('--generative', action='store_true',
                       help='use generative parser')
+  parser.add_argument('--decompose_actions', action='store_true',
+                      help='decompose action prediction to fit dynamic program')
 
   parser.add_argument('--relation_prediction', dest='predict_relations',
                       action='store_true', help='predict relation labels.')
@@ -333,7 +405,14 @@ if __name__=='__main__':
     #TODO factorize features to work with dynamic program
     feature_size = (args.hidden_size*2 if args.bidirectional 
                     else args.hidden_size)
-    transition_model = classifier.Classifier(num_features, feature_size, 
+    #TODO add option for decomposition depending on how it goes
+    if args.decompose_actions:
+      transition_model = binary_classifier.BinaryClassifier(num_gen_features, 
+        feature_size, args.hidden_size, args.cuda) 
+      direction_model = binary_classifier.BinaryClassifier(num_features, 
+        feature_size, args.hidden_size, args.cuda) 
+    else:
+      transition_model = classifier.Classifier(num_features, feature_size, 
         args.hidden_size, num_transitions, args.cuda) 
     if args.predict_relations:
       relation_model = classifier.Classifier(num_features, feature_size, 
@@ -351,7 +430,10 @@ if __name__=='__main__':
         relation_model.cuda()
       if args.generative:
         word_model.cuda()
+      if args.decompose_actions:
+        direction_model.cuda()
     criterion = nn.CrossEntropyLoss()
+    binary_criterion = nn.BCELoss()
 
     params = (list(encoder_model.parameters()) 
               + list(transition_model.parameters()))
@@ -359,6 +441,8 @@ if __name__=='__main__':
       params += list(relation_model.parameters())
     if args.generative:
       params += list(word_model.parameters())
+    if args.decompose_actions:
+      params += list(direction_model.parameters())
 
     optimizer = optim.Adam(params, lr=args.lr)
    
@@ -386,19 +470,42 @@ if __name__=='__main__':
           relation_model.zero_grad()
         if args.generative:
           word_model.zero_grad()
+        normalize = nn.Sigmoid()
+
         encoder_state = encoder_model.init_hidden(batch_size)
         encoder_output = encoder_model(sentence_data, encoder_state)
 
         actions, words, labels, features, gen_features = train_oracle(train_sent.conll, 
                 encoder_output)
+        
+        if args.decompose_actions:
+          actions, directions = decompose_transitions(actions)
+
+        # when will the direction logits be none? -> from features
+        # but 2-features will be used for both sh and re
 
         #TODO next step in efficiency is to call classifier models after
         # features are concatenated into single tensor, to increase ||
-        transition_logits = [transition_model(feat) if feat is not None
-                             else None for feat in features] 
         # Filter out Nones and concatenate to get training examples
-        transition_output, action_var = filter_logits(transition_logits,
-            actions)
+        if args.decompose_actions:
+          transition_logits = [transition_model(feat) if feat is not None
+                               else None for feat in gen_features] 
+          direction_logits = [direction_model(feat) 
+                               if feat is not None and direct is not None
+                             else None for feat, direct in zip(features,
+                                 directions)] 
+          # somehow logits are too big
+          direction_output, dir_var = filter_logits(direction_logits,
+              directions, float_var=True)
+          transition_output, action_var = filter_logits(transition_logits,
+              actions, float_var=True)
+          #print(direction_output)
+          #print(dir_var) 
+        else:
+          transition_logits = [transition_model(feat) if feat is not None
+                               else None for feat in features] 
+          transition_output, action_var = filter_logits(transition_logits,
+              actions)
         
         if args.predict_relations:
           relation_logits = []
@@ -422,9 +529,34 @@ if __name__=='__main__':
 
         # at least for generative model, think carefully about loss scaling
         loss = None
-        if transition_output is not None:
-          loss = criterion(transition_output.view(-1, num_transitions),
+        if args.decompose_actions:
+          if transition_output is not None:
+            #TODO confirm dimentions, format of binary classes
+            #TODO loss is None
+            # now both is None
+            #print(transition_output)
+            #print(action_var) 
+            loss = binary_criterion(normalize(transition_output.view(-1)),
                            action_var)
+            #print('trans loss')
+            #print(loss)
+            #print('trans loss {:5.4f}'.format(loss))
+            if direction_logits is not None:
+              #print(direction_output)
+              #print(dir_var) 
+              dir_loss = binary_criterion(normalize(direction_output.view(-1)),
+                           dir_var)
+              #print('dir loss')
+              #print(dir_loss)
+              #print('dir loss {:5.4f}'.format(dir_loss))
+              loss = loss + dir_loss if loss is not None else dir_loss
+
+        else:
+          if transition_output is not None:
+            loss = criterion(transition_output.view(-1, num_transitions),
+                           action_var)
+         
+
         if args.predict_relations and relation_output is not None:
             rel_loss = criterion(relation_output.view(-1, num_relations), 
                                  label_var)
@@ -458,14 +590,22 @@ if __name__=='__main__':
       conll_predicted = []
 
       encoder_model.eval()
+      normalize = nn.Sigmoid() 
       for val_sent in dev_sentences:
         sentence_data = get_sentence_batch(val_sent, args.cuda, evaluation=True)
         encoder_state = encoder_model.init_hidden(val_batch_size)
         encoder_output = encoder_model(sentence_data, encoder_state)
     
         #TODO evaluate word prediction for generative model
-        predict, transition_logits, actions, relation_logits, labels = greedy_decode(
+        #TODO transition logits for decomposed model
+        if args.decompose_actions:
+          predict, transition_logits, direction_logits, actions, relation_logits, labels = greedy_decode(
+            val_sent.conll, encoder_output, transition_model, relation_model,
+            direction_model)
+        else:
+          predict, transition_logits, _, actions, relation_logits, labels = greedy_decode(
             val_sent.conll, encoder_output, transition_model, relation_model)
+
 
         for j, token in enumerate(predict):
           # Convert labels to str
@@ -474,12 +614,36 @@ if __name__=='__main__':
         conll_predicted.append(predict) 
 
         # Filter out Nones to get examples for loss, then concatenate
-        transition_output, action_var = filter_logits(transition_logits,
-            actions)
+        if args.decompose_actions:
+          transition_output, action_var = filter_logits(transition_logits,
+              actions, float_var=True)
+          direction_output, dir_var = filter_logits(direction_logits,
+            directions, float_var=True)
+        else:
+          transition_output, action_var = filter_logits(transition_logits,
+             actions)
 
         if transition_output is not None:
-          total_loss += criterion(transition_output.view(-1, num_transitions),
-                                  action_var).data
+          if args.decompose_actions:
+            tr_loss = binary_criterion(normalize(transition_output.view(-1)),
+                                    action_var).data
+            #if math.isnan(tr_loss[0]):
+            #  print('Transition loss')
+            #  print(transition_output)
+            #  print(action_var)
+            total_loss += tr_loss
+            if direction_output is not None:
+              dir_loss = binary_criterion(normalize(direction_output.view(-1)),
+                                      dir_var).data
+              #if math.isnan(dir_loss[0]):
+              #  print('Direction loss')
+              #  print(direction_output)
+              #  print(dir_var)
+              total_loss += dir_loss
+          else:
+            total_loss += criterion(transition_output.view(-1, num_transitions),
+                                    action_var).data
+
           if args.predict_relations:
             relation_output, label_var = filter_logits(relation_logits, labels)
             if relation_output is not None:
@@ -506,8 +670,12 @@ if __name__=='__main__':
           model_fn = working_path + args.save_model + '_relation.pt'
           with open(model_fn, 'wb') as f:
             torch.save(relation_model, f)
-        if word_model is not None:
+        if args.generative:
           model_fn = working_path + args.save_model + '_word.pt'
           with open(model_fn, 'wb') as f:
             torch.save(word_model, f)
+        if args.decompose_actions:
+          model_fn = working_path + args.save_model + '_direction.pt'
+          with open(model_fn, 'wb') as f:
+            torch.save(direction_model, f)
   train()
