@@ -11,6 +11,11 @@ _SH = 0
 _LA = 1
 _RA = 2
 
+_SSH = 0
+_SRE = 1
+_DLA = 0
+_DRA = 1
+
 _EOS = 0
 
 class ConllEntry:
