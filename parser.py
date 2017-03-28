@@ -26,7 +26,7 @@ import data_utils
 import nn_utils
 
 # Training oracle for single example
-def train_oracle(conll, encoder_features):
+def train_oracle(conll, encoder_features, more_context=False):
   stack = data_utils.ParseForest([])
   buf = data_utils.ParseForest([conll[0]])
   buffer_index = 0
@@ -63,10 +63,16 @@ def train_oracle(conll, encoder_features):
           if len(stack.roots[-1].children) == num_children[s0]:
             action = data_utils._RA 
 
-      if args.cuda:
-        feature_positions = Variable(torch.LongTensor([s0, s1, b])).cuda()
+      if more_context:
+        s2 = stack.roots[-3].id if len(stack) >= 3 else 0
+        position = [s0, s1, s2, b]
       else:
-        feature_positions = Variable(torch.LongTensor([s0, s1, b]))
+        position = [s0, s1, b]
+
+      if args.cuda:
+        feature_positions = Variable(torch.LongTensor(position)).cuda()
+      else:
+        feature_positions = Variable(torch.LongTensor(position))
       feature = torch.index_select(encoder_features, 0, feature_positions)
 
     if args.cuda:
@@ -110,7 +116,7 @@ def train_oracle(conll, encoder_features):
 
 
 def greedy_decode(conll, encoder_features, transition_model,
-        relation_model=None, direction_model=None):
+        relation_model=None, direction_model=None, more_context=False):
   stack = data_utils.ParseForest([])
   buf = data_utils.ParseForest([conll[0]])
   buffer_index = 0
@@ -138,10 +144,16 @@ def greedy_decode(conll, encoder_features, transition_model,
       else:
         b = buf.roots[0].id 
       
-      if args.cuda:
-        feature_positions = Variable(torch.LongTensor([s0, s1, b])).cuda()
+      if more_context:
+        s2 = stack.roots[-3].id if len(stack) >= 3 else 0
+        position = [s0, s1, s2, b]
       else:
-        feature_positions = Variable(torch.LongTensor([s0, s1, b]))
+        position = [s0, s1, b]
+
+      if args.cuda:
+        feature_positions = Variable(torch.LongTensor(position)).cuda()
+      else:
+        feature_positions = Variable(torch.LongTensor(position))
       features = torch.index_select(encoder_features, 0, feature_positions)
 
       if args.cuda:
@@ -392,7 +404,7 @@ if __name__=='__main__':
     vocab_size = len(word_vocab)
     num_relations = len(rel_vocab)
     num_transitions = 3
-    num_features = 3
+    num_features = 3 if args.generative or args.decompose_actions else 4
     num_gen_features = 2
 
     batch_size = args.batch_size
@@ -476,7 +488,7 @@ if __name__=='__main__':
         encoder_output = encoder_model(sentence_data, encoder_state)
 
         actions, words, labels, features, gen_features = train_oracle(train_sent.conll, 
-                encoder_output)
+                encoder_output, num_features==4)
         
         if args.decompose_actions:
           actions, directions = decompose_transitions(actions)
@@ -604,8 +616,8 @@ if __name__=='__main__':
             direction_model)
         else:
           predict, transition_logits, _, actions, relation_logits, labels = greedy_decode(
-            val_sent.conll, encoder_output, transition_model, relation_model)
-
+            val_sent.conll, encoder_output, transition_model, relation_model,
+            more_context=(num_features==4))
 
         for j, token in enumerate(predict):
           # Convert labels to str
