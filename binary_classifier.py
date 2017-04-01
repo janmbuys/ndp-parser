@@ -28,7 +28,7 @@ class BinaryClassifier(nn.Module):
     # TODO check where batch dimension should be
     flat_features = features.view(1, -1)
     hidden = self.encode(flat_features)
-    hidden_nonlin = F.tanh(hidden)
+    hidden_nonlin = F.tanh(hidden) # it would be faster to do avoid hidden layer
     logits = self.project(hidden_nonlin)
     return logits #.view(1)
 

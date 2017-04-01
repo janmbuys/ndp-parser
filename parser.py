@@ -154,7 +154,7 @@ def viterbi_decode(conll, encoder_features, transition_model,
 
   # loop over features, range does not include EOS
   for i in range(sent_length-1):
-    for j in range(i+1, sent_length):
+    for j in range(i+1, sent_length): #TODO batch computation
       gen_features = select_features(encoder_features, [i, j], args.cuda)      
       re_prob = to_numpy(binary_normalize(transition_model(gen_features)))[0]
       reduce_probs[i, j] = re_prob
@@ -165,8 +165,8 @@ def viterbi_decode(conll, encoder_features, transition_model,
         else:
           word_log_probs[i, j] = to_numpy(word_dist[data_utils._EOS])
 
-  print('Reduce probs')
-  print(reduce_probs)
+  #print('Reduce probs')
+  #print(reduce_probs)
 
   table = np.empty([sent_length+1, sent_length+1])
   table.fill(-np.inf) # log probabilities
@@ -185,15 +185,21 @@ def viterbi_decode(conll, encoder_features, transition_model,
   #TODO make code cleaner later
   for j in range(2, sent_length+1):
     word_block_scores = []
+    score_pairs = []
+    # So table (j-2, j-1) stays small
     for i in range(j-1):
       score = table[i, j-1] + np.log(1 - reduce_probs[i, j-1]) 
+      score_pairs.append((table[i, j-1], np.log(1 - reduce_probs[i, j-1])))
+      #if i == j-2:
+      #  print('last one %.4f %.4f' % (table[i, j-1], 
+      #         np.log(1 - reduce_probs[i, j-1])))
       if word_model is not None:
         score += word_log_probs[i, j-1]
       word_block_scores.append(score)
-    print('word_block_scores')
-    print(word_block_scores)
+    #print('word_block_score pairs')
+    #print(score_pairs)
     k = np.argmax(word_block_scores)
-    print(k)
+    #print(k)
     table[j-1, j] = word_block_scores[k]
     split_indexes[j-1, j] = k
     for i in range(j-2, -1, -1):
@@ -203,14 +209,13 @@ def viterbi_decode(conll, encoder_features, transition_model,
         if j < sent_length:
           score = table[i, k] + table[k, j] + np.log(reduce_probs[k, j])
           if direction_model is not None:
-          #if False: #TODO temp
             dir_features = select_features(encoder_features, [i, k, j], args.cuda)
             ra_prob = to_numpy(binary_normalize(direction_model(dir_features)))[0]
             if ra_prob < 0.5:
-              #score += np.log(1-ra_prob)
+              score += np.log(1-ra_prob)
               block_directions.append(data_utils._DLA)
             else:
-              #score += np.log(ra_prob)
+              score += np.log(ra_prob)
               block_directions.append(data_utils._DRA)
         else:    
           # has to right-arc
@@ -218,7 +223,11 @@ def viterbi_decode(conll, encoder_features, transition_model,
           if direction_model is not None:
             block_directions.append(data_utils._DRA)
         block_scores.append(score)
+      # this seems fine
+      #print('block scores')
+      #print(block_scores)
       ind = np.argmax(block_scores)
+      #print(ind)
       k = ind + i + 1
       table[i, j] = block_scores[ind]
       split_indexes[i, j] = k
