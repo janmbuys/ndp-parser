@@ -70,19 +70,12 @@ def train_oracle(conll, encoder_features, more_context=False):
         s2 = stack.roots[-3].id if len(stack) >= 3 else 0
         position = [s0, s1, s2, b]
       else:
-        position = [s0, s1, b]
+        position = [s0, s1] #, b] #TODO temp smaller features
 
-      if args.cuda:
-        feature_positions = Variable(torch.LongTensor(position)).cuda()
-      else:
-        feature_positions = Variable(torch.LongTensor(position))
-      feature = torch.index_select(encoder_features, 0, feature_positions)
-
-    if args.cuda:
-      gen_feature_positions = Variable(torch.LongTensor([s0, b])).cuda()
-    else:
-      gen_feature_positions = Variable(torch.LongTensor([s0, b]))
-    gen_feature = torch.index_select(encoder_features, 0, gen_feature_positions)
+      feature = select_features(encoder_features, position, args.cuda)
+      
+    gen_position = [s0, b]
+    gen_feature = select_features(encoder_features, gen_position, args.cuda)
 
     actions.append(action)
     features.append(feature)
@@ -123,21 +116,35 @@ def select_features(input_features, indexes, use_cuda=False):
     positions = Variable(torch.LongTensor(indexes)).cuda()
   else:
     positions = Variable(torch.LongTensor(indexes))
+  
   return torch.index_select(input_features, 0, positions)
 
 
-def backtrack_path(table, split_indexes, directions, i, j):
+def batch_feature_selection(input_features, sent_length, use_cuda=False):
+  indexes = []
+  for i in range(sent_length-1):
+    for j in range(i+1, sent_length):
+      indexes.extend([i, j])
+  if use_cuda:
+    positions = Variable(torch.LongTensor(indexes)).cuda()
+  else:
+    positions = Variable(torch.LongTensor(indexes))
+  selected_features = torch.index_select(input_features, 0, positions)
+  return selected_features.view(-1, 2, input_features.size(2))
+
+
+def backtrack_path(table, split_indexes, directions, l, i, j):
    """ Find action sequence for best path. """
    #TODO add option for only sh/re
    #TODO add label prediction
    if i == j - 1:
      return [data_utils._SH]
    else:
-     k = split_indexes[i, j]
-     direct = directions[i, j]
+     k = split_indexes[l, i, j]
+     direct = directions[l, i, j]
      act = data_utils._LA if direct == data_utils._DLA else data_utils._RA
-     return (backtrack_path(table, split_indexes, directions, i, k)
-             + backtrack_path(table, split_indexes, directions, k, j) 
+     return (backtrack_path(table, split_indexes, directions, l, i, k)
+             + backtrack_path(table, split_indexes, directions, i, k, j) 
              + [act])
 
 
@@ -149,93 +156,114 @@ def viterbi_decode(conll, encoder_features, transition_model,
 
   # compute all sh/re and word probabilities
   reduce_probs = np.zeros([sent_length, sent_length])
+  ra_probs = np.zeros([sent_length, sent_length])
   word_log_probs = np.empty([sent_length, sent_length])
   word_log_probs.fill(-np.inf)
 
-  # loop over features, range does not include EOS
-  for i in range(sent_length-1):
-    for j in range(i+1, sent_length): #TODO batch computation
-      gen_features = select_features(encoder_features, [i, j], args.cuda)      
-      re_prob = to_numpy(binary_normalize(transition_model(gen_features)))[0]
-      reduce_probs[i, j] = re_prob
-      if word_model is not None:
-        word_dist = log_normalize(word_model(gen_features).view(-1))
-        if j < sent_length - 1:
-          word_log_probs[i, j] = to_numpy(word_dist[conll[j+1].word_id])
-        else:
-          word_log_probs[i, j] = to_numpy(word_dist[data_utils._EOS])
+  batch_comp = True
+  if batch_comp:
+    gen_features = batch_feature_selection(encoder_features, sent_length,
+                                           args.cuda)
+    re_probs_list = to_numpy(binary_normalize(transition_model(gen_features)))
+    ra_probs_list = to_numpy(binary_normalize(direction_model(gen_features)))
+    if word_model is not None:
+      word_dist = log_normalize(word_model(gen_features))
+
+    counter = 0 
+    for i in range(sent_length-1):
+      for j in range(i+1, sent_length):
+        reduce_probs[i, j] = re_probs_list[counter, 0]
+        ra_probs[i, j] = ra_probs_list[counter, 0]
+        if word_model is not None:
+          if j < sent_length - 1:
+            word_id = conll[j+1].word_id 
+          else:
+            word_id = data_utils._EOS
+          word_log_probs[i, j] = to_numpy(word_dist[counter, word_id])
+
+        counter += 1
+  else:
+    # loop over features, range does not include EOS
+    for i in range(sent_length-1):
+      for j in range(i+1, sent_length):
+        gen_features = select_features(encoder_features, [i, j], args.cuda)      
+        re_prob = to_numpy(binary_normalize(transition_model(gen_features)))[0]
+        reduce_probs[i, j] = re_prob
+        ra_probs[i, j] = to_numpy(binary_normalize(direction_model(gen_features)))[0]
+        if word_model is not None:
+          word_dist = log_normalize(word_model(gen_features).view(-1))
+          if j < sent_length - 1:
+            word_log_probs[i, j] = to_numpy(word_dist[conll[j+1].word_id])
+          else:
+            word_log_probs[i, j] = to_numpy(word_dist[data_utils._EOS])
 
   #print('Reduce probs')
   #print(reduce_probs)
 
-  table = np.empty([sent_length+1, sent_length+1])
+  table = np.empty([sent_length+1, sent_length+1, sent_length+1])
   table.fill(-np.inf) # log probabilities
-  split_indexes = np.zeros((sent_length+1, sent_length+1), dtype=np.int)
-  directions = np.zeros((sent_length+1, sent_length+1), dtype=np.int)
+  split_indexes = np.zeros((sent_length+1, sent_length+1, sent_length+1), 
+                           dtype=np.int)
+  directions = np.zeros((sent_length+1, sent_length+1, sent_length+1), 
+                        dtype=np.int)
   directions.fill(data_utils._DRA) # default
 
   # first word prob 
   if word_model is not None:
     init_features = select_features(encoder_features, [0, 0], args.cuda)
     word_dist = log_normalize(word_model(init_features).view(-1))
-    table[0, 1] = to_numpy(word_dist[conll[1].word_id])
+    table[0, 0, 1] = to_numpy(word_dist[conll[1].word_id])
   else:
-    table[0, 1] = 0
+    table[0, 0, 1] = 0
 
   #TODO make code cleaner later
   for j in range(2, sent_length+1):
-    word_block_scores = []
-    score_pairs = []
+    #score_pairs = []
     # So table (j-2, j-1) stays small
     for i in range(j-1):
-      score = table[i, j-1] + np.log(1 - reduce_probs[i, j-1]) 
-      score_pairs.append((table[i, j-1], np.log(1 - reduce_probs[i, j-1])))
+      score = np.log(1 - reduce_probs[i, j-1]) 
+      if word_model is not None:
+        score += word_log_probs[i, j-1]
+      table[i, j-1, j] = score
+      #score_pairs.append((table[i, j-1], np.log(1 - reduce_probs[i, j-1])))
       #if i == j-2:
       #  print('last one %.4f %.4f' % (table[i, j-1], 
       #         np.log(1 - reduce_probs[i, j-1])))
-      if word_model is not None:
-        score += word_log_probs[i, j-1]
-      word_block_scores.append(score)
-    #print('word_block_score pairs')
     #print(score_pairs)
-    k = np.argmax(word_block_scores)
-    #print(k)
-    table[j-1, j] = word_block_scores[k]
-    split_indexes[j-1, j] = k
     for i in range(j-2, -1, -1):
-      block_scores = [] # adjust indexes after collecting scores
-      block_directions = []
-      for k in range(i+1, j):
-        if j < sent_length:
-          score = table[i, k] + table[k, j] + np.log(reduce_probs[k, j])
-          if direction_model is not None:
-            dir_features = select_features(encoder_features, [i, k, j], args.cuda)
-            ra_prob = to_numpy(binary_normalize(direction_model(dir_features)))[0]
-            if ra_prob < 0.5:
-              score += np.log(1-ra_prob)
-              block_directions.append(data_utils._DLA)
-            else:
-              score += np.log(ra_prob)
+      for l in range(max(i, 1)): # l=0 if i=0
+        block_scores = [] # adjust indexes after collecting scores
+        block_directions = []
+        for k in range(i+1, j):
+          if j < sent_length:
+            score = table[l, i, k] + table[i, k, j] + np.log(reduce_probs[k, j])
+            if direction_model is not None:
+              ra_prob = ra_probs[k, j]
+              if ra_prob < 0.5:
+                score += np.log(1-ra_prob)
+                block_directions.append(data_utils._DLA)
+              else:
+                score += np.log(ra_prob)
+                block_directions.append(data_utils._DRA)
+          else:    
+            # has to right-arc
+            score = table[l, i, k] + table[i, k, j] 
+            if direction_model is not None:
               block_directions.append(data_utils._DRA)
-        else:    
-          # has to right-arc
-          score = table[i, k] + table[k, j] 
-          if direction_model is not None:
-            block_directions.append(data_utils._DRA)
-        block_scores.append(score)
-      # this seems fine
-      #print('block scores')
-      #print(block_scores)
-      ind = np.argmax(block_scores)
-      #print(ind)
-      k = ind + i + 1
-      table[i, j] = block_scores[ind]
-      split_indexes[i, j] = k
-      if direction_model is not None:
-        directions[i, j] = block_directions[ind]
+          block_scores.append(score)
+        # this seems fine
+        #print('block scores')
+        #print(block_scores)
+        ind = np.argmax(block_scores)
+        #print(ind)
+        k = ind + i + 1
+        table[l, i, j] = block_scores[ind]
+        split_indexes[l, i, j] = k
+        if direction_model is not None:
+          directions[l, i, j] = block_directions[ind]
   #print(table)
   #print(split_indexes)
-  actions = backtrack_path(table, split_indexes, directions, 0, sent_length)
+  actions = backtrack_path(table, split_indexes, directions, 0, 0, sent_length)
   return decode_action_sequence(conll, actions, encoder_features,
           transition_model, relation_model, direction_model)
 
@@ -270,23 +298,17 @@ def decode_action_sequence(conll, actions, encoder_features, transition_model,
       else:
         b = buf.roots[0].id 
       
-      if more_context:
+      if more_context: #TODO can I abstract this to ensure consistency?
         s2 = stack.roots[-3].id if len(stack) >= 3 else 0
         position = [s0, s1, s2, b]
       else:
-        position = [s0, s1, b]
+        position = [s0, s1] #, b]  
 
-      if args.cuda:
-        feature_positions = Variable(torch.LongTensor(position)).cuda()
-      else:
-        feature_positions = Variable(torch.LongTensor(position))
-      features = torch.index_select(encoder_features, 0, feature_positions)
+      features = select_features(encoder_features, position, args.cuda)
 
-      if args.cuda:
-        gen_feature_positions = Variable(torch.LongTensor([s0, b])).cuda()
-      else:
-        gen_feature_positions = Variable(torch.LongTensor([s0, b]))
-      gen_features = torch.index_select(encoder_features, 0, gen_feature_positions)
+      gen_position = [s0, b]
+      gen_features = select_features(encoder_features, gen_position, args.cuda)
+      
       if direction_model is not None: # find action from decomposed 
         transition_logit = transition_model(gen_features)
         if buffer_index == sent_length:
@@ -386,20 +408,13 @@ def greedy_decode(conll, encoder_features, transition_model,
         s2 = stack.roots[-3].id if len(stack) >= 3 else 0
         position = [s0, s1, s2, b]
       else:
-        position = [s0, s1, b]
+        position = [s0, s1] #, b] TODO temp smaller features
 
-      if args.cuda:
-        feature_positions = Variable(torch.LongTensor(position)).cuda()
-      else:
-        feature_positions = Variable(torch.LongTensor(position))
-      features = torch.index_select(encoder_features, 0, feature_positions)
-
-      if args.cuda:
-        gen_feature_positions = Variable(torch.LongTensor([s0, b])).cuda()
-      else:
-        gen_feature_positions = Variable(torch.LongTensor([s0, b]))
-      gen_features = torch.index_select(encoder_features, 0, gen_feature_positions)
-
+      features = select_features(encoder_features, position, args.cuda)
+      
+      gen_position = [s0, b]
+      gen_feature = select_features(encoder_features, gen_position, args.cuda)
+      
       #TODO rather score transition and relation jointly for greedy choice
 
       if direction_model is not None: # find action from decomposed 
@@ -500,6 +515,7 @@ def filter_logits(logits, targets, float_var=False):
     return output, target_var
   else:
     return None, None
+
 
 def decompose_transitions(actions):
   stackops = []
@@ -635,7 +651,7 @@ if __name__=='__main__':
 
   if args.small_data:
     sentences = sentences[:100]
-    dev_sentences = dev_sentences[:100]
+    dev_sentences = dev_sentences #[:10]
 
   #data_utils.create_length_histogram(sentences)
 
@@ -647,7 +663,7 @@ if __name__=='__main__':
     vocab_size = len(word_vocab)
     num_relations = len(rel_vocab)
     num_transitions = 3
-    num_features = 3 if args.generative or args.decompose_actions else 4
+    num_features = 2 if args.generative or args.decompose_actions else 4
     num_gen_features = 2
     batch_size = args.batch_size
 
@@ -778,7 +794,7 @@ if __name__=='__main__':
     vocab_size = len(word_vocab)
     num_relations = len(rel_vocab)
     num_transitions = 3
-    num_features = 3 if args.generative or args.decompose_actions else 4
+    num_features = 2 if args.generative or args.decompose_actions else 4
     num_gen_features = 2
 
     batch_size = args.batch_size

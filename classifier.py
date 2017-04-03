@@ -12,7 +12,8 @@ class Classifier(nn.Module):
     super(Classifier, self).__init__()
     self.use_cuda = use_cuda
 
-    self.encode = nn.Linear(feature_size*num_features, hidden_size)
+    self.encode_size = feature_size*num_features
+    self.encode = nn.Linear(self.encode_size, hidden_size)
     self.project = nn.Linear(hidden_size, output_size)
 
     self.init_weights()
@@ -25,9 +26,8 @@ class Classifier(nn.Module):
     self.project.bias.data.fill_(1)
     self.project.weight.data.uniform_(-initrange, initrange)
 
-  def forward(self, features): # features dim: [num_features, 1, feature_size]
-    # TODO check where batch dimension should be
-    flat_features = features.view(1, -1)
+  def forward(self, features): # features dim: [batch_size, num_features, feature_size]
+    flat_features = features.view(-1, self.encode_size)
     hidden = self.encode(flat_features)
     hidden_nonlin = F.tanh(hidden)
     logits = self.project(hidden_nonlin)

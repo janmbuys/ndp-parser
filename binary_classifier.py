@@ -11,7 +11,8 @@ class BinaryClassifier(nn.Module):
     super(BinaryClassifier, self).__init__()
     self.use_cuda = use_cuda
 
-    self.encode = nn.Linear(feature_size*num_features, hidden_size)
+    self.encode_size = feature_size*num_features
+    self.encode = nn.Linear(self.encode_size, hidden_size)
     self.project = nn.Linear(hidden_size, 1)
 
     self.init_weights()
@@ -24,12 +25,11 @@ class BinaryClassifier(nn.Module):
     self.project.bias.data.fill_(1)
     self.project.weight.data.uniform_(-initrange, initrange)
 
-  def forward(self, features): # features dim: [num_features, 1, feature_size]
-    # TODO check where batch dimension should be
-    flat_features = features.view(1, -1)
+  def forward(self, features): # features dim: [batch_size, num_features, feature_size]
+    flat_features = features.view(-1, self.encode_size)
     hidden = self.encode(flat_features)
     hidden_nonlin = F.tanh(hidden) # it would be faster to do avoid hidden layer
     logits = self.project(hidden_nonlin)
-    return logits #.view(1)
+    return logits
 
 
