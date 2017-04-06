@@ -28,6 +28,14 @@ import nn_utils
 def to_numpy(dist):
   return dist.type(torch.FloatTensor).data.numpy()
 
+# Ensure feature extracting is consistent
+def extract_feature_positions(b, s0, s1=None, s2=None, more_context=False):
+  # return in increasing order
+  if more_context and s1 is not None and s2 is not None:
+    return [s2, s1, s0, b]
+  else:
+    return [s0, b]
+
 # Training oracle for single example
 def train_oracle(conll, encoder_features, more_context=False):
   stack = data_utils.ParseForest([])
@@ -54,6 +62,7 @@ def train_oracle(conll, encoder_features, more_context=False):
     if len(stack) > 1: # allowed to ra or la
       s0 = stack.roots[-1].id 
       s1 = stack.roots[-2].id 
+      s2 = stack.roots[-3].id if len(stack) >= 3 else 0
       if buffer_index == sent_length:
         action = data_utils._RA
         b = sent_length - 1 # last encoded word
@@ -66,15 +75,10 @@ def train_oracle(conll, encoder_features, more_context=False):
           if len(stack.roots[-1].children) == num_children[s0]:
             action = data_utils._RA 
 
-      if more_context:
-        s2 = stack.roots[-3].id if len(stack) >= 3 else 0
-        position = [s0, s1, s2, b]
-      else:
-        position = [s0, s1] #, b] #TODO temp smaller features
-
+      position = extract_feature_positions(b, s0, s1, s2, more_context) 
       feature = select_features(encoder_features, position, args.cuda)
       
-    gen_position = [s0, b]
+    gen_position = extract_feature_positions(b, s0)
     gen_feature = select_features(encoder_features, gen_position, args.cuda)
 
     actions.append(action)
@@ -197,9 +201,6 @@ def viterbi_decode(conll, encoder_features, transition_model,
           else:
             word_log_probs[i, j] = to_numpy(word_dist[data_utils._EOS])
 
-  #print('Reduce probs')
-  #print(reduce_probs)
-
   table = np.empty([sent_length+1, sent_length+1, sent_length+1])
   table.fill(-np.inf) # log probabilities
   split_indexes = np.zeros((sent_length+1, sent_length+1, sent_length+1), 
@@ -216,20 +217,12 @@ def viterbi_decode(conll, encoder_features, transition_model,
   else:
     table[0, 0, 1] = 0
 
-  #TODO make code cleaner later
   for j in range(2, sent_length+1):
-    #score_pairs = []
-    # So table (j-2, j-1) stays small
     for i in range(j-1):
       score = np.log(1 - reduce_probs[i, j-1]) 
       if word_model is not None:
         score += word_log_probs[i, j-1]
       table[i, j-1, j] = score
-      #score_pairs.append((table[i, j-1], np.log(1 - reduce_probs[i, j-1])))
-      #if i == j-2:
-      #  print('last one %.4f %.4f' % (table[i, j-1], 
-      #         np.log(1 - reduce_probs[i, j-1])))
-    #print(score_pairs)
     for i in range(j-2, -1, -1):
       for l in range(max(i, 1)): # l=0 if i=0
         block_scores = [] # adjust indexes after collecting scores
@@ -247,7 +240,7 @@ def viterbi_decode(conll, encoder_features, transition_model,
                 block_directions.append(data_utils._DRA)
           else:    
             # has to right-arc
-            score = table[l, i, k] + table[i, k, j] 
+            score = table[l, i, k] + table[i, k, j]
             if direction_model is not None:
               block_directions.append(data_utils._DRA)
           block_scores.append(score)
@@ -264,8 +257,84 @@ def viterbi_decode(conll, encoder_features, transition_model,
   #print(table)
   #print(split_indexes)
   actions = backtrack_path(table, split_indexes, directions, 0, 0, sent_length)
+  print(table[0, 0, sent_length]) # scores should match
   return decode_action_sequence(conll, actions, encoder_features,
           transition_model, relation_model, direction_model)
+
+
+def inside_score_decode(conll, encoder_features, transition_model, word_model):
+  '''Compute inside score for testing, not training.'''
+  assert word_model is not None
+  sent_length = len(conll) # includes root, but not EOS
+  log_normalize = nn.LogSoftmax()
+  binary_normalize = nn.Sigmoid()
+
+  # compute all sh/re and word probabilities
+  reduce_probs = np.zeros([sent_length, sent_length])
+  word_log_probs = np.empty([sent_length, sent_length])
+  word_log_probs.fill(-np.inf)
+
+  batch_comp = True
+  if batch_comp:
+    gen_features = batch_feature_selection(encoder_features, sent_length,
+                                           args.cuda)
+    re_probs_list = to_numpy(binary_normalize(transition_model(gen_features)))
+    word_dist = log_normalize(word_model(gen_features))
+
+    counter = 0 
+    for i in range(sent_length-1):
+      for j in range(i+1, sent_length):
+        reduce_probs[i, j] = re_probs_list[counter, 0]
+        if word_model is not None:
+          if j < sent_length - 1:
+            word_id = conll[j+1].word_id 
+          else:
+            word_id = data_utils._EOS
+          word_log_probs[i, j] = to_numpy(word_dist[counter, word_id])
+
+        counter += 1
+  else:
+    # loop over features, range does not include EOS
+    for i in range(sent_length-1):
+      for j in range(i+1, sent_length):
+        gen_features = select_features(encoder_features, [i, j], args.cuda)      
+        re_prob = to_numpy(binary_normalize(transition_model(gen_features)))[0]
+        reduce_probs[i, j] = re_prob
+        if word_model is not None:
+          word_dist = log_normalize(word_model(gen_features).view(-1))
+          if j < sent_length - 1:
+            word_log_probs[i, j] = to_numpy(word_dist[conll[j+1].word_id])
+          else:
+            word_log_probs[i, j] = to_numpy(word_dist[data_utils._EOS])
+
+  table = np.empty([sent_length+1, sent_length+1, sent_length+1])
+  table.fill(-np.inf) # log probabilities
+
+  # first word prob 
+  if word_model is not None:
+    init_features = select_features(encoder_features, [0, 0], args.cuda)
+    word_dist = log_normalize(word_model(init_features).view(-1))
+    table[0, 0, 1] = to_numpy(word_dist[conll[1].word_id])
+  else:
+    table[0, 0, 1] = 0
+
+  for j in range(2, sent_length+1):
+    for i in range(j-1):
+      score = np.log(1 - reduce_probs[i, j-1]) 
+      if word_model is not None:
+        score += word_log_probs[i, j-1]
+      table[i, j-1, j] = score
+    for i in range(j-2, -1, -1):
+      for l in range(max(i, 1)): # l=0 if i=0
+        score = 0 
+        for k in range(i+1, j):
+          if j < sent_length:
+            score += table[l, i, k] + table[i, k, j] + np.log(reduce_probs[k, j])
+          else:    
+            # has to right-arc
+            score += table[l, i, k] + table[i, k, j] 
+        table[l, i, j] = score
+  return table[0, 0, sent_length]
 
 
 def decode_action_sequence(conll, actions, encoder_features, transition_model,
@@ -298,15 +367,12 @@ def decode_action_sequence(conll, actions, encoder_features, transition_model,
       else:
         b = buf.roots[0].id 
       
-      if more_context: #TODO can I abstract this to ensure consistency?
-        s2 = stack.roots[-3].id if len(stack) >= 3 else 0
-        position = [s0, s1, s2, b]
-      else:
-        position = [s0, s1] #, b]  
-
+      s2 = stack.roots[-3].id if len(stack) >= 3 else 0
+      
+      position = extract_feature_positions(b, s0, s1, s2, more_context)
       features = select_features(encoder_features, position, args.cuda)
 
-      gen_position = [s0, b]
+      gen_position = extract_feature_positions(b, s0)
       gen_features = select_features(encoder_features, gen_position, args.cuda)
       
       if direction_model is not None: # find action from decomposed 
@@ -404,21 +470,15 @@ def greedy_decode(conll, encoder_features, transition_model,
       else:
         b = buf.roots[0].id 
       
-      if more_context:
-        s2 = stack.roots[-3].id if len(stack) >= 3 else 0
-        position = [s0, s1, s2, b]
-      else:
-        position = [s0, s1] #, b] TODO temp smaller features
+      s2 = stack.roots[-3].id if len(stack) >= 3 else 0
 
+      position = extract_feature_positions(b, s0, s1, s2, more_context)
       features = select_features(encoder_features, position, args.cuda)
-      
-      gen_position = [s0, b]
-      gen_feature = select_features(encoder_features, gen_position, args.cuda)
       
       #TODO rather score transition and relation jointly for greedy choice
 
       if direction_model is not None: # find action from decomposed 
-        transition_logit = transition_model(gen_features)
+        transition_logit = transition_model(features)
         if buffer_index == sent_length:
           sh_action = data_utils._SRE 
         else: #TODO check, but instead of sigmoid can just test > 0
@@ -570,6 +630,9 @@ if __name__=='__main__':
   parser.add_argument('--decode', action='store_true', 
                       help='Only decode, assuming existing model', 
                       default=False)
+  parser.add_argument('--score', action='store_true', 
+                      help='Only score, assuming existing model', 
+                      default=False)
 
   parser.add_argument('--embedding_size', type=int, default=128,
                       help='size of word embeddings')
@@ -595,6 +658,15 @@ if __name__=='__main__':
                       help='decompose action prediction to fit dynamic program')
   parser.add_argument('--viterbi_decode', action='store_true',
                       help='Perform Viterbi decoding')
+  parser.add_argument('--inside_decode', action='store_true',
+                      help='Compute inside score for decoding')
+  parser.add_argument('--criterion_size_average', 
+                      dest='criterion_size_average', action='store_true', 
+                      help='Global loss averaging')
+  parser.add_argument('--no_criterion_size_average',
+                      dest='criterion_size_average', action='store_true', 
+                      help='Local loss averaging')
+  parser.set_defaults(criterion_size_average=True)
 
   parser.add_argument('--relation_prediction', dest='predict_relations',
                       action='store_true', help='predict relation labels.')
@@ -651,13 +723,96 @@ if __name__=='__main__':
 
   if args.small_data:
     sentences = sentences[:100]
-    dev_sentences = dev_sentences #[:10]
+    dev_sentences = dev_sentences[:10]
 
   #data_utils.create_length_histogram(sentences)
 
   # Extract static oracle sequences
   #for sent in sentences:
   #  actions, labels = data_utils.oracle(sent.conll)
+
+  def score():
+    vocab_size = len(word_vocab)
+    num_relations = len(rel_vocab)
+    num_transitions = 3
+    num_features = 2 if args.generative or args.decompose_actions else 4
+    num_gen_features = 2
+    batch_size = args.batch_size
+
+    print('Loading models')
+    # Load models. TODO only load parameters
+    model_fn = working_path + args.save_model + '_encoder.pt'
+    with open(model_fn, 'rb') as f:
+      encoder_model = torch.load(f)
+    model_fn = working_path + args.save_model + '_transition.pt'
+    with open(model_fn, 'rb') as f:
+      transition_model = torch.load(f)
+    if args.predict_relations:
+      model_fn = working_path + args.save_model + '_relation.pt'
+      with open(model_fn, 'rb') as f:
+        relation_model = torch.load(f)
+    if args.generative:
+      model_fn = working_path + args.save_model + '_word.pt'
+      with open(model_fn, 'rb') as f:
+        word_model = torch.load(f)
+    if args.decompose_actions:
+      model_fn = working_path + args.save_model + '_direction.pt'
+      with open(model_fn, 'rb') as f:
+        direction_model = torch.load(f)
+
+    #TODO not sure if this is neccessary
+    if args.cuda:
+      encoder_model.cuda()
+      transition_model.cuda()
+      if args.predict_relations:
+        relation_model.cuda()
+      if args.generative:
+        word_model.cuda()
+      if args.decompose_actions:
+        direction_model.cuda()
+
+    criterion = nn.CrossEntropyLoss(size_average=args.criterion_size_average)
+    binary_criterion = nn.BCELoss(size_average=args.criterion_size_average)
+
+    print('Done loading models')
+
+    val_batch_size = 1
+    total_loss = 0
+    total_length = 0
+    conll_predicted = []
+    dev_losses = []
+    decode_start_time = time.time()
+
+    encoder_model.eval()
+    normalize = nn.Sigmoid() 
+    if not args.generative:
+      word_model = None
+
+    for val_sent in dev_sentences:
+      sentence_loss = 0
+      sentence_data = get_sentence_batch(val_sent, args.cuda, evaluation=True)
+      encoder_state = encoder_model.init_hidden(val_batch_size)
+      encoder_output = encoder_model(sentence_data, encoder_state)
+      total_length += len(val_sent) - 1 
+  
+      #TODO evaluate word prediction for generative model
+      if args.decompose_actions:
+        if args.inside_score_decode: #TODO move to score()
+          inside_score = inside_decode(val_sent.conll, encoder_output,
+              transition_model, word_model)
+          dev_losses.append(inside_score)
+          total_loss += inside_score
+        #else:
+          #TODO greedy score
+      #else:
+        #TODO greedy score
+
+    val_loss = total_loss / total_length
+    print('-' * 89)
+    print('| decoding time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
+         (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
+    print('-' * 89)
+ 
 
   def decode():
     vocab_size = len(word_vocab)
@@ -699,14 +854,16 @@ if __name__=='__main__':
       if args.decompose_actions:
         direction_model.cuda()
 
-    criterion = nn.CrossEntropyLoss()
-    binary_criterion = nn.BCELoss()
+    criterion = nn.CrossEntropyLoss(size_average=args.criterion_size_average)
+    binary_criterion = nn.BCELoss(size_average=args.criterion_size_average)
 
     print('Done loading models')
 
     val_batch_size = 1
     total_loss = 0
+    total_length = 0
     conll_predicted = []
+    dev_losses = []
     decode_start_time = time.time()
 
     encoder_model.eval()
@@ -715,9 +872,11 @@ if __name__=='__main__':
       word_model = None
 
     for val_sent in dev_sentences:
+      sentence_loss = 0
       sentence_data = get_sentence_batch(val_sent, args.cuda, evaluation=True)
       encoder_state = encoder_model.init_hidden(val_batch_size)
       encoder_output = encoder_model(sentence_data, encoder_state)
+      total_length += len(val_sent) - 1 
   
       #TODO evaluate word prediction for generative model
       if args.decompose_actions:
@@ -726,6 +885,9 @@ if __name__=='__main__':
               val_sent.conll, encoder_output, transition_model, word_model,
               direction_model, relation_model)
           print(actions)
+        elif args.inside_score_decode: #TODO move to score()
+          inside_score = inside_decode(val_sent.conll, encoder_output,
+              transition_model, word_model)
         else:
           predict, transition_logits, direction_logits, actions, relation_logits, labels = greedy_decode(
             val_sent.conll, encoder_output, transition_model, relation_model,
@@ -762,7 +924,7 @@ if __name__=='__main__':
           #  print('Transition loss')
           #  print(transition_output)
           #  print(action_var)
-          total_loss += tr_loss
+          sentence_loss += tr_loss
           if direction_output is not None:
             dir_loss = binary_criterion(normalize(direction_output.view(-1)),
                                     dir_var).data
@@ -770,23 +932,27 @@ if __name__=='__main__':
             #  print('Direction loss')
             #  print(direction_output)
             #  print(dir_var)
-            total_loss += dir_loss
+            sentence_loss += dir_loss
         else:
-          total_loss += criterion(transition_output.view(-1, num_transitions),
+          sentence_loss += criterion(transition_output.view(-1, num_transitions),
                                   action_var).data
 
         if args.predict_relations:
           relation_output, label_var = filter_logits(relation_logits, labels)
           if relation_output is not None:
-            total_loss += criterion(relation_output.view(-1, num_relations),
+            sentence_loss += criterion(relation_output.view(-1, num_relations),
                                     label_var).data
+      total_loss += sentence_loss
+      dev_losses.append(sentence_loss[0])
 
+    with open(working_path + args.dev_name + '.score', 'w') as fh:
+      for loss in dev_losses:
+        fh.write(str(loss) + '\n')
     data_utils.write_conll(working_path + args.dev_name + '.output.conll', conll_predicted)
-    val_loss = total_loss[0] / len(dev_sentences)
+    val_loss = total_loss[0] / total_length
     print('-' * 89)
-    print('| decoding time: {:5.2f}s | valid loss {:5.2f} | '.format(
-         (time.time() - decode_start_time), val_loss))
-          #'valid ppl {:8.2f}'
+    print('| decoding time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
+         (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
     print('-' * 89)
  
 
@@ -834,8 +1000,8 @@ if __name__=='__main__':
         word_model.cuda()
       if args.decompose_actions:
         direction_model.cuda()
-    criterion = nn.CrossEntropyLoss()
-    binary_criterion = nn.BCELoss()
+    criterion = nn.CrossEntropyLoss(size_average=args.criterion_size_average)
+    binary_criterion = nn.BCELoss(size_average=args.criterion_size_average)
 
     params = (list(encoder_model.parameters()) 
               + list(transition_model.parameters()))
@@ -858,11 +1024,14 @@ if __name__=='__main__':
       #TODO batch for RNN encoder
 
       total_loss = 0 
+      global_loss = 0 
+      total_num_tokens = 0 
+      global_num_tokens = 0 
       encoder_model.train()
 
+      start_time = time.time()
       for i, train_sent in enumerate(sentences):
         # Training loop
-        start_time = time.time()
 
         # sentence encoder
         sentence_data = get_sentence_batch(train_sent, args.cuda)
@@ -933,7 +1102,7 @@ if __name__=='__main__':
         loss = None
         if args.decompose_actions:
           if transition_output is not None:
-            #TODO confirm dimentions, format of binary classes
+            #TODO confirm dimensions, format of binary classes
             #TODO loss is None
             # now both is None
             #print(transition_output)
@@ -968,15 +1137,18 @@ if __name__=='__main__':
                                   word_var)
             loss = loss + word_loss if loss is not None else word_loss
 
+        total_num_tokens += len(train_sent) - 1 
+        global_num_tokens += len(train_sent) - 1 
         if loss is not None:
           loss.backward()
           if args.grad_clip > 0:
-           nn_utils.clip_grad_norm(params, args.grad_clip)
-           optimizer.step() 
+            nn_utils.clip_grad_norm(params, args.grad_clip)
+          optimizer.step() 
           total_loss += loss.data
+          global_loss += loss.data
  
         if i % args.logging_interval == 0 and i > 0:
-          cur_loss = total_loss[0] / args.logging_interval
+          cur_loss = total_loss[0] / total_num_tokens
           elapsed = time.time() - start_time
           print('| epoch {:3d} | {:5d}/{:5d} batches | ms/batch {:5.2f} | '
                   'loss {:5.2f}'.format(  # | ppl {:8.2f}
@@ -984,10 +1156,18 @@ if __name__=='__main__':
               elapsed * 1000 / args.logging_interval, cur_loss))
               #math.exp(cur_loss)))
           total_loss = 0
+          total_num_tokens = 0
           start_time = time.time()
+     
+      avg_global_loss = global_loss[0] / global_num_tokens
+      print('-' * 89)
+      print('| end of epoch {:3d} | {:5d} batches | tokens {:5d} | loss {:5.2f} | ppl {:8.2f}'.format(
+          epoch, len(sentences), global_num_tokens,
+          avg_global_loss, math.exp(avg_global_loss)))
 
       val_batch_size = 1
       total_loss = 0
+      total_length = 0
       conll_predicted = []
       decode_start_time = time.time()
 
@@ -995,13 +1175,13 @@ if __name__=='__main__':
       normalize = nn.Sigmoid() 
       if not args.generative:
         word_model = None
-
+    
+      print('Decoding dev sentences')
       for val_sent in dev_sentences:
         sentence_data = get_sentence_batch(val_sent, args.cuda, evaluation=True)
         encoder_state = encoder_model.init_hidden(val_batch_size)
         encoder_output = encoder_model(sentence_data, encoder_state)
     
-        #TODO evaluate word prediction for generative model
         if args.decompose_actions:
           if args.viterbi_decode:
             predict, transition_logits, direction_logits, actions, relation_logits, labels = viterbi_decode(
@@ -1017,6 +1197,7 @@ if __name__=='__main__':
             val_sent.conll, encoder_output, transition_model, relation_model,
             more_context=(num_features==4))
 
+        #TODO need to compute word probabilities here
         for j, token in enumerate(predict):
           # Convert labels to str
           if j > 0 and relation_model is not None and token.pred_relation_ind >= 0:
@@ -1036,6 +1217,7 @@ if __name__=='__main__':
           transition_output, action_var = filter_logits(transition_logits,
              actions)
 
+        total_length += len(val_sent) - 1
         if transition_output is not None:
           if args.decompose_actions:
             tr_loss = binary_criterion(normalize(transition_output.view(-1)),
@@ -1064,11 +1246,11 @@ if __name__=='__main__':
                                       label_var).data
 
       data_utils.write_conll(working_path + args.dev_name + '.' + str(epoch) + '.output.conll', conll_predicted)
-      val_loss = total_loss[0] / len(dev_sentences)
+      val_loss = total_loss[0] / total_length
       print('-' * 89)
-      print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '.format(
-          epoch, (time.time() - epoch_start_time), val_loss))
-            #'valid ppl {:8.2f}'
+      print('| end of epoch {:3d} | time: {:5.2f}s | {:5d} tokens | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
+          epoch, (time.time() - epoch_start_time), total_length, val_loss,
+          math.exp(val_loss)))
       print('decoding time: {:5.2f}s'.format(time.time() - decode_start_time))
       print('-' * 89)
 
@@ -1094,6 +1276,8 @@ if __name__=='__main__':
             torch.save(direction_model, f)
   if args.decode:          
     decode()
+  elif args.score:
+    score()
   else:
     train()
 

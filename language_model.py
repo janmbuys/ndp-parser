@@ -139,7 +139,7 @@ if __name__=='__main__':
     if args.cuda:
       model.cuda()
 
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(size_average=False)
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
     # Loop over epochs.
@@ -150,10 +150,13 @@ if __name__=='__main__':
       random.shuffle(sentences)
       model.train()
       total_loss = 0
+      total_num_tokens = 0
+      global_loss = 0
+      global_num_tokens = 0
 
+      start_time = time.time()
       for i, train_sent in enumerate(sentences):
         # Training loop
-        start_time = time.time()
         data, targets = get_sentence_batch(train_sent, args.cuda)
         model.zero_grad()
         hidden_state = model.init_hidden(batch_size)
@@ -167,9 +170,12 @@ if __name__=='__main__':
         #for p in model.parameters():
         #  p.data.add_(-lr, p.grad.data)
         total_loss += loss.data
+        global_loss += loss.data
+        total_num_tokens += len(train_sent) - 1 
+        global_num_tokens += len(train_sent) - 1 
 
         if i % args.logging_interval == 0 and i > 0:
-          cur_loss = total_loss[0] / args.logging_interval
+          cur_loss = total_loss[0] / total_num_tokens
           elapsed = time.time() - start_time
           print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.2f} | ms/batch {:5.2f} | '
                   'loss {:5.2f} | ppl {:8.2f}'.format(
@@ -177,9 +183,16 @@ if __name__=='__main__':
               elapsed * 1000 / args.logging_interval, cur_loss, 
               math.exp(cur_loss)))
           total_loss = 0
+          total_num_tokens = 0
           start_time = time.time()
+      
+      avg_global_loss = global_loss[0] / global_num_tokens
+      print('-' * 89)
+      print('| end of epoch {:3d} | {:5d} batches | tokens {:5d} | loss {:5.2f} | ppl {:8.2f}'.format(
+              epoch, len(sentences), global_num_tokens,
+              avg_global_loss, math.exp(avg_global_loss)))
 
-      # Evualate
+      # Evaluate
       val_batch_size = 1
       total_loss = 0
       total_length = 0
@@ -190,17 +203,17 @@ if __name__=='__main__':
         output, hidden_state = model(data, hidden_state)
         output_flat = output.view(-1, vocab_size)
         total_loss += criterion(output_flat, targets).data
-        total_length += len(data)
-      val_loss = total_loss[0] / len(dev_sentences)
+        total_length += len(val_sent) - 1 
+      val_loss = total_loss[0] / total_length
 
-      print('-' * 89)
-      print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
+      print('| end of epoch {:3d} | time: {:5.2f}s | {:5d} tokens | valid loss {:5.2f} | '
               'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
-                                         val_loss, math.exp(val_loss)))
+                                         total_length, val_loss, math.exp(val_loss)))
       print('-' * 89)
       # Anneal the learning rate.
-      if prev_val_loss and val_loss > prev_val_loss:
-        lr /= 4
+      # TODO check if I was actually doing this
+      #if prev_val_loss and val_loss > prev_val_loss:
+      #  lr /= 4
       prev_val_loss = val_loss
 
       # save the model
