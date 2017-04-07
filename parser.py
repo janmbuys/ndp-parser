@@ -28,93 +28,15 @@ import nn_utils
 def to_numpy(dist):
   return dist.type(torch.FloatTensor).data.numpy()
 
-# Ensure feature extracting is consistent
+
 def extract_feature_positions(b, s0, s1=None, s2=None, more_context=False):
-  # return in increasing order
+  # Ensure feature extraction is consistent
   if more_context and s1 is not None and s2 is not None:
     return [s2, s1, s0, b]
   else:
     return [s0, b]
 
-# Training oracle for single example
-def train_oracle(conll, encoder_features, more_context=False):
-  stack = data_utils.ParseForest([])
-  buf = data_utils.ParseForest([conll[0]])
-  buffer_index = 0
-  sent_length = len(conll)
 
-  num_children = [0 for _ in conll]
-  for token in conll:
-    num_children[token.parent_id] += 1
-
-  actions = []
-  labels = []
-  words = []
-  gen_features = []
-  features = []
-
-  while buffer_index < sent_length or len(stack) > 1:
-    feature = None
-    action = data_utils._SH
-    b = 0
-    s0 = stack.roots[-1].id if len(stack) > 0 else 0
-
-    if len(stack) > 1: # allowed to ra or la
-      s0 = stack.roots[-1].id 
-      s1 = stack.roots[-2].id 
-      s2 = stack.roots[-3].id if len(stack) >= 3 else 0
-      if buffer_index == sent_length:
-        action = data_utils._RA
-        b = sent_length - 1 # last encoded word
-      else:
-        b = buf.roots[0].id # == buffer_index
-        if stack.roots[-1].parent_id == b: # candidate la
-          if len(stack.roots[-1].children) == num_children[s0]:
-            action = data_utils._LA 
-        elif stack.roots[-1].parent_id == s1: # candidate ra
-          if len(stack.roots[-1].children) == num_children[s0]:
-            action = data_utils._RA 
-
-      position = extract_feature_positions(b, s0, s1, s2, more_context) 
-      feature = select_features(encoder_features, position, args.cuda)
-      
-    gen_position = extract_feature_positions(b, s0)
-    gen_feature = select_features(encoder_features, gen_position, args.cuda)
-
-    actions.append(action)
-    features.append(feature)
-    gen_features.append(gen_feature)
-     
-    label = -1 if action == data_utils._SH else stack.roots[-1].relation_id
-    if action == data_utils._SH:
-      if buffer_index+1 < sent_length:
-        word = conll[buffer_index+1].word_id
-      else:
-        word = data_utils._EOS
-    else:
-      word = -1
-        
-    labels.append(label)
-    words.append(word)
-
-    # excecute action
-    if action == data_utils._SH:
-      stack.roots.append(buf.roots[0]) 
-      buffer_index += 1
-      if buffer_index == sent_length:
-        buf = data_utils.ParseForest([])
-      else:
-        buf = data_utils.ParseForest([conll[buffer_index]])
-    else:  
-      assert len(stack) > 0
-      child = stack.roots.pop()
-      if action == data_utils._LA:
-        buf.roots[0].children.append(child) 
-      else:
-        stack.roots[-1].children.append(child)
-  return actions, words, labels, features, gen_features
-
-#TODO use for all instances with this contruction
 def select_features(input_features, indexes, use_cuda=False):
   if use_cuda:
     positions = Variable(torch.LongTensor(indexes)).cuda()
@@ -124,17 +46,78 @@ def select_features(input_features, indexes, use_cuda=False):
   return torch.index_select(input_features, 0, positions)
 
 
-def batch_feature_selection(input_features, sent_length, use_cuda=False):
+def batch_feature_selection(input_features, seq_length, use_cuda=False):
   indexes = []
-  for i in range(sent_length-1):
-    for j in range(i+1, sent_length):
+  for i in range(seq_length-1):
+    for j in range(i+1, seq_length):
       indexes.extend([i, j])
   if use_cuda:
     positions = Variable(torch.LongTensor(indexes)).cuda()
   else:
     positions = Variable(torch.LongTensor(indexes))
+
   selected_features = torch.index_select(input_features, 0, positions)
   return selected_features.view(-1, 2, input_features.size(2))
+
+
+def filter_logits(logits, targets, float_var=False):
+  logits_filtered = []
+  targets_filtered = []
+  for logit, target in zip(logits, targets):
+    # this should handle the case where not direction logits 
+    # should be predicted
+    if logit is not None and target is not None: 
+      logits_filtered.append(logit)
+      targets_filtered.append(target)
+
+  #logits_filtered = [logit for logit in logits if logit is not None]
+  #targets_filtered = [target for (logit, target) in zip(logits, targets)
+  #                        if logit is not None]
+
+  if logits_filtered:
+    if args.cuda:
+      #print(logits_filtered)
+      #print(targets_filtered)
+      if float_var:
+        target_var = Variable(torch.FloatTensor(targets_filtered)).cuda()
+      else:  
+        target_var = Variable(torch.LongTensor(targets_filtered)).cuda()
+    else:
+      if float_var:
+        target_var = Variable(torch.FloatTensor(targets_filtered))
+      else:
+        target_var = Variable(torch.LongTensor(targets_filtered))
+
+    output = torch.cat(logits_filtered, 0)
+    return output, target_var
+  else:
+    return None, None
+
+
+def decompose_transitions(actions):
+  stackops = []
+  directions = []
+  
+  for action in actions:
+    if action == data_utils._SH:
+      stackops.append(data_utils._SSH)
+      directions.append(None)
+    else:
+      stackops.append(data_utils._SRE)
+      if action == data_utils._LA:
+        directions.append(data_utils._DLA)
+      else:  
+        directions.append(data_utils._DRA)
+  
+  return stackops, directions
+
+
+def get_sentence_batch(source, use_cuda, evaluation=False):
+  if use_cuda:
+    data = Variable(source.word_tensor, volatile=evaluation).cuda()
+  else:
+    data = Variable(source.word_tensor, volatile=evaluation)
+  return data
 
 
 def backtrack_path(table, split_indexes, directions, l, i, j):
@@ -152,195 +135,9 @@ def backtrack_path(table, split_indexes, directions, l, i, j):
              + [act])
 
 
-def viterbi_decode(conll, encoder_features, transition_model,
-        word_model=None, direction_model=None, relation_model=None):
-  sent_length = len(conll) # includes root, but not EOS
-  log_normalize = nn.LogSoftmax()
-  binary_normalize = nn.Sigmoid()
-
-  # compute all sh/re and word probabilities
-  reduce_probs = np.zeros([sent_length, sent_length])
-  ra_probs = np.zeros([sent_length, sent_length])
-  word_log_probs = np.empty([sent_length, sent_length])
-  word_log_probs.fill(-np.inf)
-
-  batch_comp = True
-  if batch_comp:
-    gen_features = batch_feature_selection(encoder_features, sent_length,
-                                           args.cuda)
-    re_probs_list = to_numpy(binary_normalize(transition_model(gen_features)))
-    ra_probs_list = to_numpy(binary_normalize(direction_model(gen_features)))
-    if word_model is not None:
-      word_dist = log_normalize(word_model(gen_features))
-
-    counter = 0 
-    for i in range(sent_length-1):
-      for j in range(i+1, sent_length):
-        reduce_probs[i, j] = re_probs_list[counter, 0]
-        ra_probs[i, j] = ra_probs_list[counter, 0]
-        if word_model is not None:
-          if j < sent_length - 1:
-            word_id = conll[j+1].word_id 
-          else:
-            word_id = data_utils._EOS
-          word_log_probs[i, j] = to_numpy(word_dist[counter, word_id])
-
-        counter += 1
-  else:
-    # loop over features, range does not include EOS
-    for i in range(sent_length-1):
-      for j in range(i+1, sent_length):
-        gen_features = select_features(encoder_features, [i, j], args.cuda)      
-        re_prob = to_numpy(binary_normalize(transition_model(gen_features)))[0]
-        reduce_probs[i, j] = re_prob
-        ra_probs[i, j] = to_numpy(binary_normalize(direction_model(gen_features)))[0]
-        if word_model is not None:
-          word_dist = log_normalize(word_model(gen_features).view(-1))
-          if j < sent_length - 1:
-            word_log_probs[i, j] = to_numpy(word_dist[conll[j+1].word_id])
-          else:
-            word_log_probs[i, j] = to_numpy(word_dist[data_utils._EOS])
-
-  table = np.empty([sent_length+1, sent_length+1, sent_length+1])
-  table.fill(-np.inf) # log probabilities
-  split_indexes = np.zeros((sent_length+1, sent_length+1, sent_length+1), 
-                           dtype=np.int)
-  directions = np.zeros((sent_length+1, sent_length+1, sent_length+1), 
-                        dtype=np.int)
-  directions.fill(data_utils._DRA) # default
-
-  # first word prob 
-  if word_model is not None:
-    init_features = select_features(encoder_features, [0, 0], args.cuda)
-    word_dist = log_normalize(word_model(init_features).view(-1))
-    table[0, 0, 1] = to_numpy(word_dist[conll[1].word_id])
-  else:
-    table[0, 0, 1] = 0
-
-  for j in range(2, sent_length+1):
-    for i in range(j-1):
-      score = np.log(1 - reduce_probs[i, j-1]) 
-      if word_model is not None:
-        score += word_log_probs[i, j-1]
-      table[i, j-1, j] = score
-    for i in range(j-2, -1, -1):
-      for l in range(max(i, 1)): # l=0 if i=0
-        block_scores = [] # adjust indexes after collecting scores
-        block_directions = []
-        for k in range(i+1, j):
-          if j < sent_length:
-            score = table[l, i, k] + table[i, k, j] + np.log(reduce_probs[k, j])
-            if direction_model is not None:
-              ra_prob = ra_probs[k, j]
-              if ra_prob < 0.5:
-                score += np.log(1-ra_prob)
-                block_directions.append(data_utils._DLA)
-              else:
-                score += np.log(ra_prob)
-                block_directions.append(data_utils._DRA)
-          else:    
-            # has to right-arc
-            score = table[l, i, k] + table[i, k, j]
-            if direction_model is not None:
-              block_directions.append(data_utils._DRA)
-          block_scores.append(score)
-        # this seems fine
-        #print('block scores')
-        #print(block_scores)
-        ind = np.argmax(block_scores)
-        #print(ind)
-        k = ind + i + 1
-        table[l, i, j] = block_scores[ind]
-        split_indexes[l, i, j] = k
-        if direction_model is not None:
-          directions[l, i, j] = block_directions[ind]
-  #print(table)
-  #print(split_indexes)
-  actions = backtrack_path(table, split_indexes, directions, 0, 0, sent_length)
-  print(table[0, 0, sent_length]) # scores should match
-  return decode_action_sequence(conll, actions, encoder_features,
-          transition_model, relation_model, direction_model)
-
-
-def inside_score_decode(conll, encoder_features, transition_model, word_model):
-  '''Compute inside score for testing, not training.'''
-  assert word_model is not None
-  sent_length = len(conll) # includes root, but not EOS
-  log_normalize = nn.LogSoftmax()
-  binary_normalize = nn.Sigmoid()
-
-  # compute all sh/re and word probabilities
-  reduce_probs = np.zeros([sent_length, sent_length])
-  word_log_probs = np.empty([sent_length, sent_length])
-  word_log_probs.fill(-np.inf)
-
-  batch_comp = True
-  if batch_comp:
-    gen_features = batch_feature_selection(encoder_features, sent_length,
-                                           args.cuda)
-    re_probs_list = to_numpy(binary_normalize(transition_model(gen_features)))
-    word_dist = log_normalize(word_model(gen_features))
-
-    counter = 0 
-    for i in range(sent_length-1):
-      for j in range(i+1, sent_length):
-        reduce_probs[i, j] = re_probs_list[counter, 0]
-        if word_model is not None:
-          if j < sent_length - 1:
-            word_id = conll[j+1].word_id 
-          else:
-            word_id = data_utils._EOS
-          word_log_probs[i, j] = to_numpy(word_dist[counter, word_id])
-
-        counter += 1
-  else:
-    # loop over features, range does not include EOS
-    for i in range(sent_length-1):
-      for j in range(i+1, sent_length):
-        gen_features = select_features(encoder_features, [i, j], args.cuda)      
-        re_prob = to_numpy(binary_normalize(transition_model(gen_features)))[0]
-        reduce_probs[i, j] = re_prob
-        if word_model is not None:
-          word_dist = log_normalize(word_model(gen_features).view(-1))
-          if j < sent_length - 1:
-            word_log_probs[i, j] = to_numpy(word_dist[conll[j+1].word_id])
-          else:
-            word_log_probs[i, j] = to_numpy(word_dist[data_utils._EOS])
-
-  table = np.empty([sent_length+1, sent_length+1, sent_length+1])
-  table.fill(-np.inf) # log probabilities
-
-  # first word prob 
-  if word_model is not None:
-    init_features = select_features(encoder_features, [0, 0], args.cuda)
-    word_dist = log_normalize(word_model(init_features).view(-1))
-    table[0, 0, 1] = to_numpy(word_dist[conll[1].word_id])
-  else:
-    table[0, 0, 1] = 0
-
-  for j in range(2, sent_length+1):
-    for i in range(j-1):
-      score = np.log(1 - reduce_probs[i, j-1]) 
-      if word_model is not None:
-        score += word_log_probs[i, j-1]
-      table[i, j-1, j] = score
-    for i in range(j-2, -1, -1):
-      for l in range(max(i, 1)): # l=0 if i=0
-        score = 0 
-        for k in range(i+1, j):
-          if j < sent_length:
-            score += table[l, i, k] + table[i, k, j] + np.log(reduce_probs[k, j])
-          else:    
-            # has to right-arc
-            score += table[l, i, k] + table[i, k, j] 
-        table[l, i, j] = score
-  return table[0, 0, sent_length]
-
-
 def decode_action_sequence(conll, actions, encoder_features, transition_model,
         relation_model=None, direction_model=None, more_context=False):
   """Execute a given action sequence, also find best relations."""
-  assert relation_model is not None # TMP
   stack = data_utils.ParseForest([])
   buf = data_utils.ParseForest([conll[0]])
   buffer_index = 0
@@ -353,30 +150,21 @@ def decode_action_sequence(conll, actions, encoder_features, transition_model,
   normalize = nn.Sigmoid()
 
   for action in actions:
-    #while buffer_index < sent_length or len(stack) > 1:
     transition_logit = None
     relation_logit = None
     direction_logit = None
+
     label = -1
+    s0 = stack.roots[-1].id if len(stack) > 0 else 0
+    s1 = stack.roots[-2].id if len(stack) > 1 else 0
+    s2 = stack.roots[-3].id if len(stack) > 2 else 0
 
     if len(stack) > 1: # allowed to ra or la
-      s0 = stack.roots[-1].id 
-      s1 = stack.roots[-2].id 
-      if buffer_index == sent_length:
-        b = sent_length - 1
-      else:
-        b = buf.roots[0].id 
-      
-      s2 = stack.roots[-3].id if len(stack) >= 3 else 0
-      
-      position = extract_feature_positions(b, s0, s1, s2, more_context)
+      position = extract_feature_positions(buffer_index, s0, s1, s2, more_context)
       features = select_features(encoder_features, position, args.cuda)
-
-      gen_position = extract_feature_positions(b, s0)
-      gen_features = select_features(encoder_features, gen_position, args.cuda)
       
-      if direction_model is not None: # find action from decomposed 
-        transition_logit = transition_model(gen_features)
+      if direction_model is not None: 
+        transition_logit = transition_model(features)
         if buffer_index == sent_length:
           assert action == data_utils._RA
           sh_action = data_utils._SRE 
@@ -437,10 +225,149 @@ def decode_action_sequence(conll, actions, encoder_features, transition_model,
         conll[child.id].pred_parent_id = stack.roots[-1].id
       if relation_model is not None:
         conll[child.id].pred_relation_ind = label
-  #print(labels)
-  return conll, transition_logits, direction_logits, actions, relation_logits, labels
- 
 
+  return conll, transition_logits, direction_logits, actions, relation_logits, labels
+
+
+def viterbi_decode(conll, encoder_features, transition_model,
+        word_model=None, direction_model=None, relation_model=None):
+  sent_length = len(conll) # includes root, but not EOS
+  log_normalize = nn.LogSoftmax()
+  binary_normalize = nn.Sigmoid()
+
+  # compute all sh/re and word probabilities
+  seq_length = sent_length + 1
+  reduce_probs = np.zeros([seq_length, seq_length])
+  ra_probs = np.zeros([seq_length, seq_length])
+  word_log_probs = np.empty([sent_length, sent_length])
+  word_log_probs.fill(-np.inf)
+
+  # batch feature computation
+  features = batch_feature_selection(encoder_features, seq_length, args.cuda)
+  re_probs_list = to_numpy(binary_normalize(transition_model(features)))
+  ra_probs_list = to_numpy(binary_normalize(direction_model(features)))
+  if word_model is not None:
+    word_dist = log_normalize(word_model(features))
+
+  counter = 0 
+  for i in range(seq_length-1):
+    for j in range(i+1, seq_length):
+      reduce_probs[i, j] = re_probs_list[counter, 0]
+      ra_probs[i, j] = ra_probs_list[counter, 0]
+      if word_model is not None and j < sent_length:
+        if j < sent_length - 1:
+          word_id = conll[j+1].word_id 
+        else:
+          word_id = data_utils._EOS
+        word_log_probs[i, j] = to_numpy(word_dist[counter, word_id])
+      counter += 1
+
+  table_size = sent_length + 1
+  table = np.empty([table_size, table_size, table_size])
+  table.fill(-np.inf) # log probabilities
+  split_indexes = np.zeros((table_size, table_size, table_size), dtype=np.int)
+  directions = np.zeros((table_size, table_size, table_size), dtype=np.int)
+  directions.fill(data_utils._DRA) # default direction
+
+  # first word prob 
+  if word_model is not None:
+    init_features = select_features(encoder_features, [0, 0], args.cuda)
+    word_dist = log_normalize(word_model(init_features).view(-1))
+    table[0, 0, 1] = to_numpy(word_dist[conll[1].word_id])
+  else:
+    table[0, 0, 1] = 0
+
+  for j in range(2, sent_length+1):
+    for i in range(j-1):
+      score = np.log(1 - reduce_probs[i, j-1]) 
+      if word_model is not None:
+        score += word_log_probs[i, j-1]
+      table[i, j-1, j] = score
+    for i in range(j-2, -1, -1):
+      for l in range(max(i, 1)): # l=0 if i=0
+        block_scores = [] # adjust indexes after collecting scores
+        block_directions = []
+        for k in range(i+1, j):
+          score = table[l, i, k] + table[i, k, j] + np.log(reduce_probs[k, j])
+          if direction_model is not None:
+            ra_prob = ra_probs[k, j]
+            if ra_prob > 0.5 or j == sent_length:
+              score += np.log(ra_prob)
+              block_directions.append(data_utils._DRA)
+            else:
+              score += np.log(1-ra_prob)
+              block_directions.append(data_utils._DLA)
+          block_scores.append(score)
+        ind = np.argmax(block_scores)
+        k = ind + i + 1
+        table[l, i, j] = block_scores[ind]
+        split_indexes[l, i, j] = k
+        if direction_model is not None:
+          directions[l, i, j] = block_directions[ind]
+  actions = backtrack_path(table, split_indexes, directions, 0, 0, sent_length)
+  print(table[0, 0, sent_length]) # scores should match
+  return decode_action_sequence(conll, actions, encoder_features,
+          transition_model, relation_model, direction_model)
+
+
+def inside_score_decode(conll, encoder_features, transition_model, word_model):
+  '''Compute inside score for testing, not training.'''
+  assert word_model is not None
+  sent_length = len(conll) # includes root, but not EOS
+  log_normalize = nn.LogSoftmax()
+  binary_normalize = nn.Sigmoid()
+
+# compute all sh/re and word probabilities
+  seq_length - sent_length + 1
+  reduce_probs = np.zeros([seq_length, seq_length])
+  ra_probs = np.zeros([seq_length, seq_length])
+  word_log_probs = np.empty([sent_length, sent_length])
+  word_log_probs.fill(-np.inf)
+
+  # batch feature computation
+  features = batch_feature_selection(encoder_features, sent_length, args.cuda)
+  re_probs_list = to_numpy(binary_normalize(transition_model(features)))
+  word_dist = log_normalize(word_model(features))
+
+  counter = 0 
+  for i in range(seq_length-1):
+    for j in range(i+1, seq_length):
+      reduce_probs[i, j] = re_probs_list[counter, 0]
+      if word_model is not None and j < sent_length:
+        if j < sent_length - 1:
+          word_id = conll[j+1].word_id 
+        else:
+          word_id = data_utils._EOS
+        word_log_probs[i, j] = to_numpy(word_dist[counter, word_id])
+      counter += 1
+
+  table_size = sent_length + 1
+  table = np.empty([table_size, table_size, table_size])
+  table.fill(-np.inf) # log probabilities
+
+  # first word prob 
+  if word_model is not None:
+    init_features = select_features(encoder_features, [0, 0], args.cuda)
+    word_dist = log_normalize(word_model(init_features).view(-1))
+    table[0, 0, 1] = to_numpy(word_dist[conll[1].word_id])
+  else:
+    table[0, 0, 1] = 0
+
+  for j in range(2, sent_length+1):
+    for i in range(j-1):
+      score = np.log(1 - reduce_probs[i, j-1]) 
+      if word_model is not None:
+        score += word_log_probs[i, j-1]
+      table[i, j-1, j] = score
+    for i in range(j-2, -1, -1):
+      for l in range(max(i, 1)): # l=0 if i=0
+        score = 0 
+        for k in range(i+1, j):
+          score += table[l, i, k] + table[i, k, j] + np.log(reduce_probs[k, j])
+        table[l, i, j] = score
+  return table[0, 0, sent_length]
+
+#TODO have versions with and without scoring
 def greedy_decode(conll, encoder_features, transition_model,
         relation_model=None, direction_model=None, more_context=False):
   stack = data_utils.ParseForest([])
@@ -459,24 +386,18 @@ def greedy_decode(conll, encoder_features, transition_model,
     transition_logit = None
     relation_logit = None
     direction_logit = None
+
     action = data_utils._SH
     label = -1
+    s0 = stack.roots[-1].id if len(stack) > 0 else 0
+    s1 = stack.roots[-2].id if len(stack) > 1 else 0
+    s2 = stack.roots[-3].id if len(stack) > 2 else 0
 
     if len(stack) > 1: # allowed to ra or la
-      s0 = stack.roots[-1].id 
-      s1 = stack.roots[-2].id 
-      if buffer_index == sent_length:
-        b = sent_length - 1
-      else:
-        b = buf.roots[0].id 
-      
-      s2 = stack.roots[-3].id if len(stack) >= 3 else 0
-
-      position = extract_feature_positions(b, s0, s1, s2, more_context)
+      position = extract_feature_positions(buffer_index, s0, s1, s2, more_context)
       features = select_features(encoder_features, position, args.cuda)
       
       #TODO rather score transition and relation jointly for greedy choice
-
       if direction_model is not None: # find action from decomposed 
         transition_logit = transition_model(features)
         if buffer_index == sent_length:
@@ -539,68 +460,77 @@ def greedy_decode(conll, encoder_features, transition_model,
         conll[child.id].pred_parent_id = stack.roots[-1].id
       if relation_model is not None:
         conll[child.id].pred_relation_ind = label
-  #print(labels)
+
   return conll, transition_logits, direction_logits, actions, relation_logits, labels
  
 
-def filter_logits(logits, targets, float_var=False):
-  logits_filtered = []
-  targets_filtered = []
-  for logit, target in zip(logits, targets):
-    # this should handle the case where not direction logits 
-    # should be predicted
-    if logit is not None and target is not None: 
-      logits_filtered.append(logit)
-      targets_filtered.append(target)
+def train_oracle(conll, encoder_features, more_context=False):
+  # Training oracle for single parsed sentence
+  stack = data_utils.ParseForest([])
+  buf = data_utils.ParseForest([conll[0]])
+  buffer_index = 0
+  sent_length = len(conll)
 
-  #logits_filtered = [logit for logit in logits if logit is not None]
-  #targets_filtered = [target for (logit, target) in zip(logits, targets)
-  #                        if logit is not None]
+  num_children = [0 for _ in conll]
+  for token in conll:
+    num_children[token.parent_id] += 1
 
-  if logits_filtered:
-    if args.cuda:
-      #print(logits_filtered)
-      #print(targets_filtered)
-      if float_var:
-        target_var = Variable(torch.FloatTensor(targets_filtered)).cuda()
-      else:  
-        target_var = Variable(torch.LongTensor(targets_filtered)).cuda()
-    else:
-      if float_var:
-        target_var = Variable(torch.FloatTensor(targets_filtered))
+  actions = []
+  labels = []
+  words = []
+  features = []
+
+  while buffer_index < sent_length or len(stack) > 1:
+    feature = None
+    action = data_utils._SH
+    s0 = stack.roots[-1].id if len(stack) > 0 else 0
+    s1 = stack.roots[-2].id if len(stack) > 1 else 0
+    s2 = stack.roots[-3].id if len(stack) > 2 else 0
+
+    if len(stack) > 1: # allowed to ra or la
+      if buffer_index == sent_length:
+        action = data_utils._RA
       else:
-        target_var = Variable(torch.LongTensor(targets_filtered))
-
-    output = torch.cat(logits_filtered, 0)
-    return output, target_var
-  else:
-    return None, None
-
-
-def decompose_transitions(actions):
-  stackops = []
-  directions = []
-  
-  for action in actions:
+        if stack.roots[-1].parent_id == buffer_index:
+          if len(stack.roots[-1].children) == num_children[s0]:
+            action = data_utils._LA 
+        elif stack.roots[-1].parent_id == s1:
+          if len(stack.roots[-1].children) == num_children[s0]:
+            action = data_utils._RA 
+ 
+    position = extract_feature_positions(buffer_index, s0, s1, s2, more_context) 
+    feature = select_features(encoder_features, position, args.cuda)
+    features.append(feature)
+     
+    label = -1 if action == data_utils._SH else stack.roots[-1].relation_id
     if action == data_utils._SH:
-      stackops.append(data_utils._SSH)
-      directions.append(None)
+      if buffer_index+1 < sent_length:
+        word = conll[buffer_index+1].word_id
+      else:
+        word = data_utils._EOS
     else:
-      stackops.append(data_utils._SRE)
+      word = -1
+        
+    actions.append(action)
+    labels.append(label)
+    words.append(word)
+
+    # excecute action
+    if action == data_utils._SH:
+      stack.roots.append(buf.roots[0]) 
+      buffer_index += 1
+      if buffer_index == sent_length:
+        buf = data_utils.ParseForest([])
+      else:
+        buf = data_utils.ParseForest([conll[buffer_index]])
+    else:  
+      assert len(stack) > 0
+      child = stack.roots.pop()
       if action == data_utils._LA:
-        directions.append(data_utils._DLA)
-      else:  
-        directions.append(data_utils._DRA)
-  
-  return stackops, directions
-
-
-def get_sentence_batch(source, use_cuda, evaluation=False):
-  if use_cuda:
-    data = Variable(source.word_tensor[:-1], volatile=evaluation).cuda()
-  else:
-    data = Variable(source.word_tensor[:-1], volatile=evaluation)
-  return data
+        buf.roots[0].children.append(child) 
+      else:
+        stack.roots[-1].children.append(child)
+  return actions, words, labels, features
 
 
 if __name__=='__main__':
@@ -633,21 +563,25 @@ if __name__=='__main__':
   parser.add_argument('--score', action='store_true', 
                       help='Only score, assuming existing model', 
                       default=False)
+  parser.add_argument('--viterbi_decode', action='store_true',
+                      help='Perform Viterbi decoding')
+  parser.add_argument('--inside_decode', action='store_true',
+                      help='Compute inside score for decoding')
 
   parser.add_argument('--embedding_size', type=int, default=128,
                       help='size of word embeddings')
   parser.add_argument('--hidden_size', type=int, default=128, 
                       help='humber of hidden units per layer')
-  parser.add_argument('--num_layers', type=int, default=1, # original 2
+  parser.add_argument('--num_layers', type=int, default=1,
                       help='number of layers')
-  parser.add_argument('--lr', type=float, default=0.001, # default 20 check
+  parser.add_argument('--lr', type=float, default=0.001,
                       help='initial learning rate')
-  parser.add_argument('--grad_clip', type=float, default=5, # default 0.5 check
+  parser.add_argument('--grad_clip', type=float, default=5,
                       help='gradient clipping')
   parser.add_argument('--epochs', type=int, default=100,
                       help='upper epoch limit')
   parser.add_argument('--batch_size', type=int, default=1, metavar='N',
-                      help='batch size') # original default 20
+                      help='batch size')
   parser.add_argument('--dropout', type=float, default=0.0, 
                       help='dropout rate')
   parser.add_argument('--bidirectional', action='store_true',
@@ -656,10 +590,9 @@ if __name__=='__main__':
                       help='use generative parser')
   parser.add_argument('--decompose_actions', action='store_true',
                       help='decompose action prediction to fit dynamic program')
-  parser.add_argument('--viterbi_decode', action='store_true',
-                      help='Perform Viterbi decoding')
-  parser.add_argument('--inside_decode', action='store_true',
-                      help='Compute inside score for decoding')
+  parser.add_argument('--use_more_features', action='store_true',
+                      help='use 4 instead of 2 features')
+
   parser.add_argument('--criterion_size_average', 
                       dest='criterion_size_average', action='store_true', 
                       help='Global loss averaging')
@@ -667,7 +600,6 @@ if __name__=='__main__':
                       dest='criterion_size_average', action='store_true', 
                       help='Local loss averaging')
   parser.set_defaults(criterion_size_average=True)
-
   parser.add_argument('--relation_prediction', dest='predict_relations',
                       action='store_true', help='predict relation labels.')
   parser.add_argument('--no_relation_prediction', dest='predict_relations',
@@ -683,11 +615,14 @@ if __name__=='__main__':
                       help='use small version of dataset')
   parser.add_argument('--logging_interval', type=int, default=5000, 
                       metavar='N', help='report ppl every x steps')
-  parser.add_argument('--save_model', type=str,  default='model.pt', #TODO
+  parser.add_argument('--save_model', type=str,  default='model.pt',
                       help='path to save the final model')
 
   args = parser.parse_args()
-  assert not (args.generative and args.bidirectional), 'Bidirectional encoder invalid for generative model.'
+  assert not (args.generative and args.bidirectional), 'Bidirectional encoder invalid for generative model'
+  if args.viterbi_decode or args.inside_decode:
+    assert args.decompose_actions, 'Decomposed actions required for dynamic programming'
+  assert not (args.use_more_features and args.decompose_actions), 'For decomposed features use small contexts'
 
   torch.manual_seed(args.seed)
   random.seed(args.seed)
@@ -700,7 +635,6 @@ if __name__=='__main__':
   working_path = args.working_dir + '/'
 
   # Prepare training data
-
   vocab_path = Path(data_working_path + 'vocab')
   if vocab_path.is_file() and not args.reset_vocab:
     sentences, word_vocab, pos_vocab, rel_vocab = data_utils.read_sentences_given_vocab(
@@ -722,8 +656,8 @@ if __name__=='__main__':
         replicate_rnng=args.replicate_rnng_data)
 
   if args.small_data:
-    sentences = sentences[:100]
-    dev_sentences = dev_sentences[:10]
+    sentences = sentences[:500]
+    dev_sentences = dev_sentences[:100]
 
   #data_utils.create_length_histogram(sentences)
 
@@ -735,8 +669,7 @@ if __name__=='__main__':
     vocab_size = len(word_vocab)
     num_relations = len(rel_vocab)
     num_transitions = 3
-    num_features = 2 if args.generative or args.decompose_actions else 4
-    num_gen_features = 2
+    num_features = 4 if args.use_more_features else 2
     batch_size = args.batch_size
 
     print('Loading models')
@@ -795,15 +728,11 @@ if __name__=='__main__':
       encoder_output = encoder_model(sentence_data, encoder_state)
       total_length += len(val_sent) - 1 
   
-      #TODO evaluate word prediction for generative model
-      if args.decompose_actions:
-        if args.inside_score_decode: #TODO move to score()
-          inside_score = inside_decode(val_sent.conll, encoder_output,
+      if args.decompose_actions and args.inside_decode: 
+        inside_score = inside_score_decode(val_sent.conll, encoder_output,
               transition_model, word_model)
-          dev_losses.append(inside_score)
-          total_loss += inside_score
-        #else:
-          #TODO greedy score
+        dev_losses.append(inside_score)
+        total_loss += inside_score
       #else:
         #TODO greedy score
 
@@ -818,8 +747,7 @@ if __name__=='__main__':
     vocab_size = len(word_vocab)
     num_relations = len(rel_vocab)
     num_transitions = 3
-    num_features = 2 if args.generative or args.decompose_actions else 4
-    num_gen_features = 2
+    num_features = 4 if args.use_more_features else 2
     batch_size = args.batch_size
 
     print('Loading models')
@@ -885,9 +813,6 @@ if __name__=='__main__':
               val_sent.conll, encoder_output, transition_model, word_model,
               direction_model, relation_model)
           print(actions)
-        elif args.inside_score_decode: #TODO move to score()
-          inside_score = inside_decode(val_sent.conll, encoder_output,
-              transition_model, word_model)
         else:
           predict, transition_logits, direction_logits, actions, relation_logits, labels = greedy_decode(
             val_sent.conll, encoder_output, transition_model, relation_model,
@@ -895,7 +820,7 @@ if __name__=='__main__':
       else:
         predict, transition_logits, _, actions, relation_logits, labels = greedy_decode(
           val_sent.conll, encoder_output, transition_model, relation_model,
-          more_context=(num_features==4))
+          more_context=args.use_more_features)
 
       for j, token in enumerate(predict):
         # Convert labels to str
@@ -960,8 +885,7 @@ if __name__=='__main__':
     vocab_size = len(word_vocab)
     num_relations = len(rel_vocab)
     num_transitions = 3
-    num_features = 2 if args.generative or args.decompose_actions else 4
-    num_gen_features = 2
+    num_features = 2 if args.decompose_actions else 4
 
     batch_size = args.batch_size
 
@@ -975,7 +899,7 @@ if __name__=='__main__':
                     else args.hidden_size)
     #TODO add option for decomposition depending on how it goes
     if args.decompose_actions:
-      transition_model = binary_classifier.BinaryClassifier(num_gen_features, 
+      transition_model = binary_classifier.BinaryClassifier(num_features, 
         feature_size, args.hidden_size, args.cuda) 
       direction_model = binary_classifier.BinaryClassifier(num_features, 
         feature_size, args.hidden_size, args.cuda) 
@@ -988,7 +912,7 @@ if __name__=='__main__':
     else:
       relation_model = None
     if args.generative:
-      word_model = classifier.Classifier(num_gen_features, feature_size,
+      word_model = classifier.Classifier(num_features, feature_size,
               args.hidden_size, vocab_size, args.cuda)
 
     if args.cuda:
@@ -1020,7 +944,7 @@ if __name__=='__main__':
       epoch_start_time = time.time()
       
       random.shuffle(sentences)
-      sentences.sort(key=len) 
+      #sentences.sort(key=len) 
       #TODO batch for RNN encoder
 
       total_loss = 0 
@@ -1046,8 +970,8 @@ if __name__=='__main__':
         encoder_state = encoder_model.init_hidden(batch_size)
         encoder_output = encoder_model(sentence_data, encoder_state)
 
-        actions, words, labels, features, gen_features = train_oracle(train_sent.conll, 
-                encoder_output, num_features==4)
+        actions, words, labels, features = train_oracle(train_sent.conll, 
+                encoder_output, args.use_more_features)
         
         if args.decompose_actions:
           actions, directions = decompose_transitions(actions)
@@ -1055,23 +979,18 @@ if __name__=='__main__':
         # when will the direction logits be none? -> from features
         # but 2-features will be used for both sh and re
 
-        #TODO next step in efficiency is to call classifier models after
-        # features are concatenated into single tensor, to increase ||
         # Filter out Nones and concatenate to get training examples
         if args.decompose_actions:
           transition_logits = [transition_model(feat) if feat is not None
-                               else None for feat in gen_features] 
+                               else None for feat in features] 
           direction_logits = [direction_model(feat) 
                                if feat is not None and direct is not None
                              else None for feat, direct in zip(features,
                                  directions)] 
-          # somehow logits are too big
           direction_output, dir_var = filter_logits(direction_logits,
               directions, float_var=True)
           transition_output, action_var = filter_logits(transition_logits,
               actions, float_var=True)
-          #print(direction_output)
-          #print(dir_var) 
         else:
           transition_logits = [transition_model(feat) if feat is not None
                                else None for feat in features] 
@@ -1090,7 +1009,7 @@ if __name__=='__main__':
 
         if args.generative:
           gen_word_logits = []
-          for feat, action, word in zip(gen_features, actions, words):
+          for feat, action, word in zip(features, actions, words):
             if action == data_utils._SH:
               assert word >= 0
               gen_word_logits.append(word_model(feat))
@@ -1098,28 +1017,14 @@ if __name__=='__main__':
               gen_word_logits.append(None)
           gen_word_output, word_var = filter_logits(gen_word_logits, words)
 
-        # at least for generative model, think carefully about loss scaling
         loss = None
         if args.decompose_actions:
           if transition_output is not None:
-            #TODO confirm dimensions, format of binary classes
-            #TODO loss is None
-            # now both is None
-            #print(transition_output)
-            #print(action_var) 
             loss = binary_criterion(normalize(transition_output.view(-1)),
                            action_var)
-            #print('trans loss')
-            #print(loss)
-            #print('trans loss {:5.4f}'.format(loss))
             if direction_logits is not None:
-              #print(direction_output)
-              #print(dir_var) 
               dir_loss = binary_criterion(normalize(direction_output.view(-1)),
                            dir_var)
-              #print('dir loss')
-              #print(dir_loss)
-              #print('dir loss {:5.4f}'.format(dir_loss))
               loss = loss + dir_loss if loss is not None else dir_loss
 
         else:
@@ -1151,10 +1056,10 @@ if __name__=='__main__':
           cur_loss = total_loss[0] / total_num_tokens
           elapsed = time.time() - start_time
           print('| epoch {:3d} | {:5d}/{:5d} batches | ms/batch {:5.2f} | '
-                  'loss {:5.2f}'.format(  # | ppl {:8.2f}
+                  'loss {:5.2f} | ppl {:8.2f} '.format(   
               epoch, i, len(sentences), 
-              elapsed * 1000 / args.logging_interval, cur_loss))
-              #math.exp(cur_loss)))
+              elapsed * 1000 / args.logging_interval, cur_loss,
+              math.exp(cur_loss)))
           total_loss = 0
           total_num_tokens = 0
           start_time = time.time()
@@ -1195,7 +1100,7 @@ if __name__=='__main__':
         else:
           predict, transition_logits, _, actions, relation_logits, labels = greedy_decode(
             val_sent.conll, encoder_output, transition_model, relation_model,
-            more_context=(num_features==4))
+            more_context=args.use_more_features)
 
         #TODO need to compute word probabilities here
         for j, token in enumerate(predict):
@@ -1222,18 +1127,10 @@ if __name__=='__main__':
           if args.decompose_actions:
             tr_loss = binary_criterion(normalize(transition_output.view(-1)),
                                     action_var).data
-            #if math.isnan(tr_loss[0]):
-            #  print('Transition loss')
-            #  print(transition_output)
-            #  print(action_var)
             total_loss += tr_loss
             if direction_output is not None:
               dir_loss = binary_criterion(normalize(direction_output.view(-1)),
                                       dir_var).data
-              #if math.isnan(dir_loss[0]):
-              #  print('Direction loss')
-              #  print(direction_output)
-              #  print(dir_var)
               total_loss += dir_loss
           else:
             total_loss += criterion(transition_output.view(-1, num_transitions),
