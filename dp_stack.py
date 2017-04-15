@@ -1,0 +1,85 @@
+# Author: Jan Buys
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.autograd import Variable
+
+import classifier
+import binary_classifier
+import rnn_encoder
+import nn_utils
+
+class DPStack(nn.Module):
+  """Stack-based generative model with dynamic programming inference.""" 
+
+  def __init__(self, vocab_size, embedding_size, hidden_size, num_layers,
+               dropout, num_features, use_cuda):
+    super(DPStack, self).__init__()
+    self.use_cuda = use_cuda
+    self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, embedding_size, 
+        hidden_size, num_layers, dropout, False, use_cuda)
+
+    feature_size = hidden_size
+    self.transition_model = binary_classifier.BinaryClassifier(num_features, 
+        feature_size, hidden_size, use_cuda) 
+    self.word_model = classifier.Classifier(num_features, feature_size,
+         hidden_size, vocab_size, use_cuda)
+
+    self.log_normalize = nn.LogSoftmax()
+    self.binary_normalize = nn.Sigmoid()
+
+  def _inside_algorithm(self, encoder_features, word_ids):
+    sent_length = len(word_ids) - 1
+    seq_length = len(word_ids)
+
+    features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+        self.use_cuda)
+    re_probs_list = self.binary_normalize(self.transition_model(features))
+    word_distr_list = self.log_normalize(self.word_model(features))
+
+    init_features = nn_utils.select_features(encoder_features, [0, 0], 
+                                             self.use_cuda)
+    init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
+
+    # do simple arithmetic to access distribution list entries
+    def get_feature_index(i, j):
+      return int((2*seq_length-i-1)*(i/2) + j-i-1)
+
+    def inside_op(l, i, j):
+      if l == 0 and i == 0 and j == 1:
+        return init_word_distr[word_ids[1]]
+      if i == j - 1: # word emmision
+        index = get_feature_index(l, i)
+        return (torch.log1p(-re_probs_list[index, 0]) 
+                + word_distr_list[index, word_ids[j]])
+      else:
+        block_scores = []
+        for k in range(i+1, j):
+          score = (inside_op(l, i, k) + inside_op(i, k, j) +   
+                   torch.log(re_probs_list[get_feature_index(k, j), 0]))
+          block_scores.append(score) #TODO rather add one at a time
+        return nn_utils.log_sum_exp(torch.cat(block_scores).view(1, -1))
+
+    return inside_op(0, 0, sent_length)
+
+  
+  def neg_log_likelihood(self, sentence):
+    encoder_state = self.encoder_model.init_hidden(1) # batch_size==1
+    encoder_features = self.encoder_model(sentence, encoder_state)
+    word_ids = [int(x) for x in sentence.view(-1).data]
+
+    #TODO make sure this is right quantity
+    return -self._inside_algorithm(encoder_features, word_ids)
+
+
+  def forward(self, sentence):
+    encoder_state = self.encoder_model.init_hidden(1) # batch_size==1
+    encoder_features = self.encoder_model(sentence, encoder_state)
+    word_ids = [int(x) for x in sentence.view(-1).data]
+
+    #TODO viterbi decode here
+    return self._inside_algorithm(encoder_features, word_ids)
+
+
+

@@ -22,11 +22,9 @@ from torch.autograd import Variable
 import rnn_encoder
 import classifier
 import binary_classifier
+import dp_stack
 import data_utils
 import nn_utils
-
-def to_numpy(dist):
-  return dist.type(torch.FloatTensor).data.numpy()
 
 
 def extract_feature_positions(b, s0, s1=None, s2=None, more_context=False):
@@ -35,29 +33,6 @@ def extract_feature_positions(b, s0, s1=None, s2=None, more_context=False):
     return [s2, s1, s0, b]
   else:
     return [s0, b]
-
-
-def select_features(input_features, indexes, use_cuda=False):
-  if use_cuda:
-    positions = Variable(torch.LongTensor(indexes)).cuda()
-  else:
-    positions = Variable(torch.LongTensor(indexes))
-  
-  return torch.index_select(input_features, 0, positions)
-
-
-def batch_feature_selection(input_features, seq_length, use_cuda=False):
-  indexes = []
-  for i in range(seq_length-1):
-    for j in range(i+1, seq_length):
-      indexes.extend([i, j])
-  if use_cuda:
-    positions = Variable(torch.LongTensor(indexes)).cuda()
-  else:
-    positions = Variable(torch.LongTensor(indexes))
-
-  selected_features = torch.index_select(input_features, 0, positions)
-  return selected_features.view(-1, 2, input_features.size(2))
 
 
 def filter_logits(logits, targets, float_var=False):
@@ -161,7 +136,7 @@ def decode_action_sequence(conll, actions, encoder_features, transition_model,
 
     if len(stack) > 1: # allowed to ra or la
       position = extract_feature_positions(buffer_index, s0, s1, s2, more_context)
-      features = select_features(encoder_features, position, args.cuda)
+      features = nn_utils.select_features(encoder_features, position, args.cuda)
       
       if direction_model is not None: 
         transition_logit = transition_model(features)
@@ -243,9 +218,9 @@ def viterbi_decode(conll, encoder_features, transition_model,
   word_log_probs.fill(-np.inf)
 
   # batch feature computation
-  features = batch_feature_selection(encoder_features, seq_length, args.cuda)
-  re_probs_list = to_numpy(binary_normalize(transition_model(features)))
-  ra_probs_list = to_numpy(binary_normalize(direction_model(features)))
+  features = nn_utils.batch_feature_selection(encoder_features, seq_length, args.cuda)
+  re_probs_list = nn_utils.to_numpy(binary_normalize(transition_model(features)))
+  ra_probs_list = nn_utils.to_numpy(binary_normalize(direction_model(features)))
   if word_model is not None:
     word_dist = log_normalize(word_model(features))
 
@@ -259,7 +234,7 @@ def viterbi_decode(conll, encoder_features, transition_model,
           word_id = conll[j+1].word_id 
         else:
           word_id = data_utils._EOS
-        word_log_probs[i, j] = to_numpy(word_dist[counter, word_id])
+        word_log_probs[i, j] = nn_utils.to_numpy(word_dist[counter, word_id])
       counter += 1
 
   table_size = sent_length + 1
@@ -271,9 +246,9 @@ def viterbi_decode(conll, encoder_features, transition_model,
 
   # first word prob 
   if word_model is not None:
-    init_features = select_features(encoder_features, [0, 0], args.cuda)
+    init_features = nn_utils.select_features(encoder_features, [0, 0], args.cuda)
     word_dist = log_normalize(word_model(init_features).view(-1))
-    table[0, 0, 1] = to_numpy(word_dist[conll[1].word_id])
+    table[0, 0, 1] = nn_utils.to_numpy(word_dist[conll[1].word_id])
   else:
     table[0, 0, 1] = 0
 
@@ -310,6 +285,79 @@ def viterbi_decode(conll, encoder_features, transition_model,
           transition_model, relation_model, direction_model)
 
 
+def inside_score_compute(conll, encoder_features, transition_model, word_model):
+  '''Compute inside score for training.'''
+  assert word_model is not None
+  sent_length = len(conll) # includes root, but not EOS
+  log_normalize = nn.LogSoftmax()
+  binary_normalize = nn.Sigmoid()
+
+  # compute all sh/re and word probabilities
+  seq_length = sent_length + 1
+
+  # do simple arithmetic to access entries in the inside op
+  def get_feature_index(i, j):
+    return int((2*seq_length-i-1)*(i/2) + j-i-1)
+
+  # batch feature computation
+  features = nn_utils.batch_feature_selection(encoder_features, seq_length, args.cuda)
+  re_probs_list = binary_normalize(transition_model(features))
+  word_distr_list = log_normalize(word_model(features))
+
+  # Get probabilities in python lists (entries in torch) - may not be sufficient
+  #reduce_probs = []
+  #word_log_probs = []
+  #for i in range(seq_length-1):
+  #  reduce_probs.append([None for _ in range(i+1)])
+  #  word_log_probs.append([None for _ in range(i+1)])
+  #  for j in range(i+1, seq_length):
+  #    reduce_probs[-1].append(re_probs_list[counter, 0])
+  #    if j < sent_length:
+  #      if j < sent_length - 1:
+  #        word_id = conll[j+1].word_id 
+  #      else:
+  #        word_id = data_utils._EOS
+  #      word_log_probs[-1].append(word_dist[counter, word_id])
+  #    counter += 1
+
+  table_size = sent_length + 1
+  table = []
+  for _ in range(table_size):
+    in_table = []
+    for _ in range(table_size):
+      in_table.append([None for _ in range(table_size)])
+    table.append(in_table)
+
+  # first word prob 
+  init_features = nn_utils.select_features(encoder_features, [0, 0], args.cuda)
+  init_word_dist = log_normalize(word_model(init_features).view(-1))
+  table[0][0][1] = init_word_dist[conll[1].word_id]
+  #print("computed features")
+
+  for j in range(2, sent_length+1):
+    #print(j)
+    if j < sent_length - 1:
+      word_id = conll[j+1].word_id 
+    else:
+      word_id = data_utils._EOS
+    for i in range(j-1):
+      index = get_feature_index(i, j-1)
+      table[i][j-1][j] = (torch.log1p(-re_probs_list[index, 0]) 
+                          + word_distr_list[index, word_id])
+    for i in range(j-2, -1, -1):
+      for l in range(max(i, 1)):
+        block_scores = []
+        score = None
+        for k in range(i+1, j):
+          re_score = torch.log(re_probs_list[get_feature_index(k, j), 0])
+          t_score = table[l][i][k] + table[i][k][j] + re_score
+          #score = score + t_score if score is not None else t_score
+          block_scores.append(t_score)
+        #table[l][i][j] = score
+        table[l][i][j] = nn_utils.log_sum_exp(torch.cat(block_scores).view(1, -1))
+  return table[0][0][sent_length]
+
+
 def inside_score_decode(conll, encoder_features, transition_model, word_model):
   '''Compute inside score for testing, not training.'''
   assert word_model is not None
@@ -318,15 +366,15 @@ def inside_score_decode(conll, encoder_features, transition_model, word_model):
   binary_normalize = nn.Sigmoid()
 
 # compute all sh/re and word probabilities
-  seq_length - sent_length + 1
+  seq_length = sent_length + 1
   reduce_probs = np.zeros([seq_length, seq_length])
   ra_probs = np.zeros([seq_length, seq_length])
   word_log_probs = np.empty([sent_length, sent_length])
   word_log_probs.fill(-np.inf)
 
   # batch feature computation
-  features = batch_feature_selection(encoder_features, sent_length, args.cuda)
-  re_probs_list = to_numpy(binary_normalize(transition_model(features)))
+  features = nn_utils.batch_feature_selection(encoder_features, seq_length, args.cuda)
+  re_probs_list = nn_utils.to_numpy(binary_normalize(transition_model(features)))
   word_dist = log_normalize(word_model(features))
 
   counter = 0 
@@ -338,7 +386,7 @@ def inside_score_decode(conll, encoder_features, transition_model, word_model):
           word_id = conll[j+1].word_id 
         else:
           word_id = data_utils._EOS
-        word_log_probs[i, j] = to_numpy(word_dist[counter, word_id])
+        word_log_probs[i, j] = nn_utils.to_numpy(word_dist[counter, word_id])
       counter += 1
 
   table_size = sent_length + 1
@@ -347,9 +395,9 @@ def inside_score_decode(conll, encoder_features, transition_model, word_model):
 
   # first word prob 
   if word_model is not None:
-    init_features = select_features(encoder_features, [0, 0], args.cuda)
+    init_features = nn_utils.select_features(encoder_features, [0, 0], args.cuda)
     word_dist = log_normalize(word_model(init_features).view(-1))
-    table[0, 0, 1] = to_numpy(word_dist[conll[1].word_id])
+    table[0, 0, 1] = nn_utils.to_numpy(word_dist[conll[1].word_id])
   else:
     table[0, 0, 1] = 0
 
@@ -361,9 +409,11 @@ def inside_score_decode(conll, encoder_features, transition_model, word_model):
       table[i, j-1, j] = score
     for i in range(j-2, -1, -1):
       for l in range(max(i, 1)): # l=0 if i=0
-        score = 0 
+        score = -np.inf
         for k in range(i+1, j):
-          score += table[l, i, k] + table[i, k, j] + np.log(reduce_probs[k, j])
+          item_score = (table[l, i, k] + table[i, k, j] 
+                        + np.log(reduce_probs[k, j]))
+          score = np.logaddexp(score, item_score)
         table[l, i, j] = score
   return table[0, 0, sent_length]
 
@@ -395,7 +445,7 @@ def greedy_decode(conll, encoder_features, transition_model,
 
     if len(stack) > 1: # allowed to ra or la
       position = extract_feature_positions(buffer_index, s0, s1, s2, more_context)
-      features = select_features(encoder_features, position, args.cuda)
+      features = nn_utils.select_features(encoder_features, position, args.cuda)
       
       #TODO rather score transition and relation jointly for greedy choice
       if direction_model is not None: # find action from decomposed 
@@ -499,7 +549,7 @@ def train_oracle(conll, encoder_features, more_context=False):
             action = data_utils._RA 
  
     position = extract_feature_positions(buffer_index, s0, s1, s2, more_context) 
-    feature = select_features(encoder_features, position, args.cuda)
+    feature = nn_utils.select_features(encoder_features, position, args.cuda)
     features.append(feature)
      
     label = -1 if action == data_utils._SH else stack.roots[-1].relation_id
@@ -592,6 +642,8 @@ if __name__=='__main__':
                       help='decompose action prediction to fit dynamic program')
   parser.add_argument('--use_more_features', action='store_true',
                       help='use 4 instead of 2 features')
+  parser.add_argument('--unsup', action='store_true',
+                      help='unsupervised model')
 
   parser.add_argument('--criterion_size_average', 
                       dest='criterion_size_average', action='store_true', 
@@ -731,12 +783,16 @@ if __name__=='__main__':
       if args.decompose_actions and args.inside_decode: 
         inside_score = inside_score_decode(val_sent.conll, encoder_output,
               transition_model, word_model)
-        dev_losses.append(inside_score)
-        total_loss += inside_score
+        #inside_score.backward()
+        #score = nn_utils.to_numpy(inside_score)[0]  
+        score = inside_score
+        print(score)
+        dev_losses.append(score)
+        total_loss += score
       #else:
         #TODO greedy score
 
-    val_loss = total_loss / total_length
+    val_loss = - total_loss / total_length
     print('-' * 89)
     print('| decoding time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
          (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
@@ -879,7 +935,69 @@ if __name__=='__main__':
     print('| decoding time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
          (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
     print('-' * 89)
+
+
+  def train_unsup():
+    vocab_size = len(word_vocab)
+    num_relations = len(rel_vocab)
+    num_transitions = 3
+    num_features = 2
+    batch_size = args.batch_size
+    assert args.decompose_actions and args.generative and not args.bidirectional
+    
+    # Build the model
+    feature_size = args.hidden_size
+    stack_model = dp_stack.DPStack(vocab_size, args.embedding_size,
+            args.hidden_size, args.num_layers, args.dropout, num_features,
+            args.cuda)
+
+    if args.cuda:
+      stack_model.cuda()
+
+    params = list(stack_model.parameters()) 
+    optimizer = optim.Adam(params, lr=args.lr)
+   
+    prev_val_loss = None
+    for epoch in range(1, args.epochs+1):
+      print('Start unsup training epoch %d' % epoch)
+      epoch_start_time = time.time()
+      
+      random.shuffle(sentences)
+      #sentences.sort(key=len) # temp
+
+      total_loss = 0 
+      global_loss = 0 
+      total_num_tokens = 0 
+      global_num_tokens = 0 
+      stack_model.train()
+
+      start_time = time.time()
+      for i, train_sent in enumerate(sentences):
+        # Training loop
+        total_num_tokens += len(train_sent) - 1 
+        global_num_tokens += len(train_sent) - 1 
+
+        stack_model.zero_grad()
+        normalize = nn.Sigmoid()
+
+        sentence_data = get_sentence_batch(train_sent, args.cuda)
+        loss = stack_model.neg_log_likelihood(sentence_data)
+
+        #loss.backward()
+        #if args.grad_clip > 0:
+        #  nn_utils.clip_grad_norm(params, args.grad_clip)
+        #optimizer.step() 
  
+        print(loss.data[0])
+        total_loss += loss.data
+        global_loss += loss.data
+       
+      avg_global_loss = global_loss[0] / global_num_tokens
+      print('-' * 89)
+      print('| end of epoch {:3d} | {:5d} batches | tokens {:5d} | loss {:5.2f} | ppl {:8.2f}'.format(
+          epoch, len(sentences), global_num_tokens,
+          avg_global_loss, math.exp(avg_global_loss)))
+
 
   def train():
     vocab_size = len(word_vocab)
@@ -1175,6 +1293,8 @@ if __name__=='__main__':
     decode()
   elif args.score:
     score()
+  elif args.unsup:
+    train_unsup()
   else:
     train()
 
