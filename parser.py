@@ -983,10 +983,11 @@ if __name__=='__main__':
         sentence_data = get_sentence_batch(train_sent, args.cuda)
         loss = stack_model.neg_log_likelihood(sentence_data)
 
-        #loss.backward()
-        #if args.grad_clip > 0:
-        #  nn_utils.clip_grad_norm(params, args.grad_clip)
-        #optimizer.step() 
+        if True:
+          loss.backward()
+          if args.grad_clip > 0:
+            nn_utils.clip_grad_norm(params, args.grad_clip)
+          optimizer.step() 
  
         print(loss.data[0])
         total_loss += loss.data
