@@ -52,11 +52,18 @@ def select_features(input_features, indexes, use_cuda=False):
   return torch.index_select(input_features, 0, positions)
 
 
-def batch_feature_selection(input_features, seq_length, use_cuda=False):
+def batch_feature_selection(input_features, seq_length, use_cuda=False,
+    rev=False):
   indexes = []
-  for i in range(seq_length-1):
-    for j in range(i+1, seq_length):
-      indexes.extend([i, j])
+  if rev:
+    for j in range(1, seq_length):
+      for i in range(j):
+        indexes.extend([i, j])
+  else:
+    for i in range(seq_length-1):
+      for j in range(i+1, seq_length):
+        indexes.extend([i, j])
+
   if use_cuda:
     positions = Variable(torch.LongTensor(indexes)).cuda()
   else:

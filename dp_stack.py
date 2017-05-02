@@ -125,6 +125,107 @@ class DPStack(nn.Module):
           table[l, i, j] = nn_utils.log_sum_exp(torch.cat(block_scores).view(1, -1))
     return table[0, 0, sent_length]
 
+  def _inside_algorithm_iterative_vectorized(self, encoder_features, word_ids):
+    sent_length = len(word_ids) - 1
+    seq_length = len(word_ids)
+
+    features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+        self.use_cuda)
+    features_rev = nn_utils.batch_feature_selection(encoder_features, seq_length,
+        self.use_cuda, rev=True)
+
+    re_probs_list = self.binary_normalize(self.transition_model(features)).view(-1)
+    re_probs_list_rev = self.binary_normalize(self.transition_model(features_rev)).view(-1)
+
+    word_distr_list = self.log_normalize(self.word_model(features))
+
+    init_features = nn_utils.select_features(encoder_features, [0, 0], 
+                                             self.use_cuda)
+    init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
+    # do simple arithmetic to access distribution list entries
+    def get_feature_index(i, j):
+      return int((2*seq_length-i-1)*(i/2) + j-i-1)
+
+    rev_inds_table = np.zeros((seq_length, seq_length), dtype=np.int)
+    counter = 0
+    for j in range(1, seq_length):
+      for i in range(j):
+        rev_inds_table[i,j] = counter
+        counter += 1
+
+    def get_rev_feature_index(i, j):
+      return rev_inds_table[i, j]
+
+    table_size = len(word_ids)
+    table_ts = torch.FloatTensor(table_size, table_size, table_size).fill_(-np.inf)
+    if self.use_cuda:
+      table = Variable(table_ts).cuda()
+    else:
+      table = Variable(table_ts)
+
+    # word probs
+    table[0, 0, 1] = init_word_distr[word_ids[1]]
+    for i in range(sent_length-1): # features goes 1 index further
+      start_index = get_feature_index(i, i+1)
+      end_index = get_feature_index(i, sent_length-1) # last j+1
+      ind_list = torch.LongTensor(range(i+1, sent_length+1)) # (start_index, end_index+1)
+      inds = ind_list.unfold(0, 2, 1) #.transpose(0, 1)
+
+      #word_ind0 = torch.arange(start_index, end_index+1).shape(1, -1)
+      #word_ind1 = torch.LongTensor(word_ids[i+2:sent_length+1]).shape(1, -1)
+      #word_inds = torch.cat(word_ind0, word_ind1, 0).transpose(0, 1)
+
+      word_probs_ts = torch.FloatTensor(sent_length - (i + 1)).fill_(-np.inf)
+      if self.use_cuda:
+        word_probs = Variable(word_probs_ts).cuda()
+      else:
+        word_probs = Variable(word_probs_ts)
+
+      #print(word_probs.size())
+
+      for j in range(i+1, sent_length): # features goes 1 index further
+        index = get_feature_index(i, j)
+        word_probs[j - (i + 1)] = word_distr_list[index, word_ids[j+1]]
+      re_probs = torch.log1p(-re_probs_list[start_index:end_index+1])
+      #print(re_probs.size())
+      #print(inds.size())
+
+      word_dist_ts = torch.sparse.FloatTensor([table_size, table_size])
+      #if self.use_cuda:
+      #  word_dist = Variable(word_dist_ts).cuda()
+      #else:
+      
+      #TODO can't seem to populate with a variable
+      #word_dist = Variable(word_dist_ts)
+        #      word_dist.add(torch.sparse.FloatTensor(inds, re_probs + word_probs,
+      #    torch.Size([table_size, table_size])))
+      #table[i] += word_dist.to_dense() 
+
+      for j in range(i+1, sent_length): # features goes 1 index further
+        index = get_feature_index(i, j)
+        table[i, j, j+1] = (torch.log1p(-re_probs_list[index]) 
+                            + word_distr_list[index, word_ids[j+1]])
+ 
+    for gap in range(2, sent_length+1):
+      #print(gap)
+      for i in range(sent_length+1-gap):
+        j = i + gap
+        re_temp = re_probs_list[get_rev_feature_index(i+1, j):get_rev_feature_index(j-1, j)+1]
+        temp = table[i, i+1:j, j] + torch.log(re_temp)
+         
+        for l in range(max(i, 1)):
+          block_scores = table[l, i, i+1:j] + temp 
+          table[l, i, j] = nn_utils.log_sum_exp(block_scores.view(1, -1))
+
+          #for k in range(i+1, j):
+            #re_score = torch.log(re_probs_list[get_feature_index(k, j)])
+            #t_score = table[l, i, k] + table[i, k, j] + re_score
+            #score = score + t_score if score is not None else t_score
+            #block_scores.append(t_score)
+          #table[l][i][j] = score
+          #table[l, i, j] = nn_utils.log_sum_exp(torch.cat(block_scores).view(1, -1))
+    return table[0, 0, sent_length]
+
 
 
   def _inside_algorithm_recusive(self,encoder_features, word_ids): 
@@ -168,7 +269,7 @@ class DPStack(nn.Module):
     word_ids = [int(x) for x in sentence.view(-1).data]
 
     #TODO make sure this is right quantity
-    return -self._inside_algorithm_iterative(encoder_features, word_ids)
+    return -self._inside_algorithm_iterative_vectorized(encoder_features, word_ids)
 
 
   def forward(self, sentence):
