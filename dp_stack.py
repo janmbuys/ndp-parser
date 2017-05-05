@@ -10,6 +10,7 @@ import classifier
 import binary_classifier
 import rnn_encoder
 import nn_utils
+import data_utils
 
 class DPStack(nn.Module):
   """Stack-based generative model with dynamic programming inference.""" 
@@ -62,7 +63,7 @@ class DPStack(nn.Module):
         table[i][j][j+1] = (torch.log1p(-re_probs_list[index]) 
                             + word_distr_list[index, word_ids[j+1]])
  
-    for gap in range(2, sent_length+1):
+    for gap in range(2, sent_length+1): #TODO this is not the old one
       #print(gap)
       for i in range(sent_length+1-gap):
         j = i + gap
@@ -262,13 +263,118 @@ class DPStack(nn.Module):
 
     return inside_op(0, 0, sent_length)
 
+
+  def _decode_action_sequence(self, encoder_features, word_ids, actions):
+    """Execute a given action sequence, also find best relations."""
+    # only store indexes on the stack
+    stack = []
+    buffer_index = 0
+    sent_length = len(word_ids) - 1
+
+    transition_logits = []
+    shift_dependents = [-1 for _ in word_ids] # stack top when shifted
+      # but model actually uses stack top when generated to buffer
+    reduce_dependents = [-1 for _ in word_ids] # buffer entry when reduced
+
+    for action in actions:
+      transition_logit = None
+
+      s0 = stack[-1] if len(stack) > 0 else 0
+
+      if len(stack) > 1: # allowed to re
+        position = nn_utils.extract_feature_positions(buffer_index, s0)
+        features = nn_utils.select_features(encoder_features, position, self.use_cuda)
+        
+        transition_logit = self.transition_model(features)
+        if buffer_index == sent_length:
+          assert action == data_utils._SRE
+        
+      transition_logits.append(transition_logit)
+
+      # excecute action
+      if action == data_utils._SSH:
+        if len(stack) > 0:
+          shift_dependents[buffer_index] = stack[-1]
+        stack.append(buffer_index) 
+        buffer_index += 1
+      else:  
+        assert len(stack) > 0
+        child = stack.pop()
+        reduce_dependents[child] = buffer_index
+        
+    return transition_logits, actions, shift_dependents, reduce_dependents
+
+
+  def _viterbi_algorithm(self, encoder_features, word_ids):
+    sent_length = len(word_ids) - 1
+    seq_length = len(word_ids)
+
+    features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+        self.use_cuda)
+    re_probs_list = self.binary_normalize(self.transition_model(features)).view(-1)
+    word_distr_list = self.log_normalize(self.word_model(features))
+
+
+    init_features = nn_utils.select_features(encoder_features, [0, 0], 
+                                             self.use_cuda)
+    init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
+    # do simple arithmetic to access distribution list entries
+    def get_feature_index(i, j):
+      return int((2*seq_length-i-1)*(i/2) + j-i-1)
+
+    table_size = len(word_ids)
+    table_ts = torch.FloatTensor(table_size, table_size, table_size).fill_(-np.inf)
+    if self.use_cuda:
+      table = Variable(table_ts).cuda()
+    else:
+      table = Variable(table_ts)
+    split_indexes = np.zeros((table_size, table_size, table_size), dtype=np.int)
+    # word probs
+    table[0, 0, 1] = init_word_distr[word_ids[1]]
+    for i in range(sent_length-1): # features goes 1 index further
+      for j in range(i+1, sent_length): # features goes 1 index further
+        index = get_feature_index(i, j)
+        table[i, j, j+1] = (torch.log1p(-re_probs_list[index]) 
+                            + word_distr_list[index, word_ids[j+1]])
+ 
+    for gap in range(2, sent_length+1):
+      #print(gap)
+      for i in range(sent_length+1-gap):
+        j = i + gap
+        for l in range(max(i, 1)):
+          block_scores = []
+          score = None
+          for k in range(i+1, j):
+            re_score = torch.log(re_probs_list[get_feature_index(k, j)])
+            t_score = table[l, i, k] + table[i, k, j] + re_score
+            #score = score + t_score if score is not None else t_score
+            block_scores.append(t_score)
+          #table[l][i][j] = score
+          ind = np.argmax(block_scores)
+          k = ind + i + 1
+          table[l, i, j] = block_scores[ind]
+          split_indexes[l, i, j] = k
+ 
+    def backtrack_path(l, i, j):
+      """ Find action sequence for best path. """
+      if i == j - 1:
+        return [data_utils._SSH]
+      else:
+        k = split_indexes[l, i, j]
+        return (backtrack_path(l, i, k) + backtrack_path(i, k, j) 
+                + [data_utils._SRE])
+
+    actions = backtrack_path(0, 0, sent_length)
+    return self._decode_action_sequence(encoder_features, word_ids, actions)
   
+
   def neg_log_likelihood(self, sentence):
     encoder_state = self.encoder_model.init_hidden(1) # batch_size==1
     encoder_features = self.encoder_model(sentence, encoder_state)
     word_ids = [int(x) for x in sentence.view(-1).data]
 
     #TODO make sure this is right quantity
+    #return -self._inside_algorithm_iterative(encoder_features, word_ids)
     return -self._inside_algorithm_iterative_vectorized(encoder_features, word_ids)
 
 
@@ -277,8 +383,7 @@ class DPStack(nn.Module):
     encoder_features = self.encoder_model(sentence, encoder_state)
     word_ids = [int(x) for x in sentence.view(-1).data]
 
-    #TODO viterbi decode here
-    return self._inside_algorithm_iterative(encoder_features, word_ids)
+    return self._viterbi_algorithm(encoder_features, word_ids)
 
 
 

@@ -73,3 +73,47 @@ def batch_feature_selection(input_features, seq_length, use_cuda=False,
   return selected_features.view(-1, 2, input_features.size(2))
 
 
+def extract_feature_positions(b, s0, s1=None, s2=None, more_context=False):
+  # Ensure feature extraction is consistent
+  if more_context and s1 is not None and s2 is not None:
+    return [s2, s1, s0, b]
+  else:
+    return [s0, b]
+
+
+def filter_logits(logits, targets, float_var=False, use_cuda=False):
+  logits_filtered = []
+  targets_filtered = []
+  for logit, target in zip(logits, targets):
+    # this should handle the case where not direction logits 
+    # should be predicted
+    if logit is not None and target is not None: 
+      logits_filtered.append(logit)
+      targets_filtered.append(target)
+
+  if logits_filtered:
+    if use_cuda:
+      if float_var:
+        target_var = Variable(torch.FloatTensor(targets_filtered)).cuda()
+      else:  
+        target_var = Variable(torch.LongTensor(targets_filtered)).cuda()
+    else:
+      if float_var:
+        target_var = Variable(torch.FloatTensor(targets_filtered))
+      else:
+        target_var = Variable(torch.LongTensor(targets_filtered))
+
+    output = torch.cat(logits_filtered, 0)
+    return output, target_var
+  else:
+    return None, None
+
+
+def get_sentence_batch(source, use_cuda, evaluation=False):
+  if use_cuda:
+    data = Variable(source.word_tensor, volatile=evaluation).cuda()
+  else:
+    data = Variable(source.word_tensor, volatile=evaluation)
+  return data
+
+

@@ -10,6 +10,7 @@ import torch
 _SH = 0
 _LA = 1
 _RA = 2
+_RE = 3
 
 _SSH = 0
 _SRE = 1
@@ -67,8 +68,10 @@ class ParseSentence:
     return ' '.join([entry.norm for entry in self.conll[1:]])
 
   @classmethod
-  def from_vocab_conll(cls, conll, word_vocab):
+  def from_vocab_conll(cls, conll, word_vocab, max_length=-1):
     tokens = [word_vocab.get_id(entry.norm) for entry in conll] + [_EOS]
+    if max_length > 0 and len(tokens) > max_length:
+      return cls(conll[:max_length], tokens[:max_length])
     return cls(conll, tokens)
 
 class Vocab:
@@ -341,7 +344,7 @@ def read_conll(fh, projectify, replicate_rnng=False):
 
 
 def read_sentences_create_vocab(conll_path, conll_name, working_path,
-    projectify=False, replicate_rnng=False): 
+    projectify=False, replicate_rnng=False, max_length=-1): 
     #TODO add argument include_singletons=False
   wordsCount = Counter()
   posCount = Counter()
@@ -381,7 +384,8 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path,
     for j, node in enumerate(sent): 
       sent[j].relation_id = rel_vocab.get_id(node.relation) 
       sent[j].word_id = word_vocab.get_id(node.norm) 
-    parse_sentences.append(ParseSentence.from_vocab_conll(sent, word_vocab))
+    if len(sent) <= max_length: #TODO temp hard restriction
+      parse_sentences.append(ParseSentence.from_vocab_conll(sent, word_vocab))
 
   write_text(working_path + conll_name + '.txt', parse_sentences)
 
@@ -392,7 +396,7 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path,
 
 
 def read_sentences_given_vocab(conll_path, conll_name, working_path,
-    projectify=False, replicate_rnng=False): 
+    projectify=False, replicate_rnng=False, max_length=-1): 
   word_vocab = Vocab.read_count_vocab(working_path + 'vocab')
   form_vocab = word_vocab.form_vocab()
   pos_vocab = Vocab.read_vocab(working_path + 'pos.vocab')
@@ -407,7 +411,8 @@ def read_sentences_given_vocab(conll_path, conll_name, working_path,
                                            replicate_rnng)
         sentence[j].relation_id = rel_vocab.get_id(node.relation) 
         sentence[j].word_id = word_vocab.get_id(node.norm) 
-      sentences.append(ParseSentence.from_vocab_conll(sentence, word_vocab))
+      if len(sentence) <= max_length: #TODO temp hard restriction
+        sentences.append(ParseSentence.from_vocab_conll(sentence, word_vocab))
 
   txt_filename = working_path + conll_name + '.txt'
   txt_path = Path(txt_filename)
