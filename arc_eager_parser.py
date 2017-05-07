@@ -25,7 +25,30 @@ import binary_classifier
 import data_utils
 import nn_utils
 
-def train_oracle_ae(conll, encoder_features, more_context=False):
+generate_actions = [data_utils._SH, data_utils._RA]
+
+def decompose_transitions(actions):
+  stackops = []
+  arcops = []
+  
+  for action in actions:
+    if action == data_utils._SH:
+      stackops.append(data_utils._SSH)
+      arcops.append(data_utils._LSH)
+    elif action == data_utils._RA:
+      stackops.append(data_utils._SSH)
+      arcops.append(data_utils._LRA)
+    elif action == data_utils._LA:
+      stackops.append(data_utils._SRE)
+      arcops.append(data_utils._ULA) #TODO optionally exclude from training
+    else:
+      stackops.append(data_utils._SRE)
+      arcops.append(data_utils._URE) #TODO optionally exclude from training
+ 
+  return stackops, arcops
+
+
+def train_oracle(conll, encoder_features, more_context=False):
   # Arc eager training oracle for single parsed sentence
   stack = data_utils.ParseForest([])
   buf = data_utils.ParseForest([conll[0]])
@@ -120,6 +143,63 @@ def train_oracle_ae(conll, encoder_features, more_context=False):
   return actions, words, labels, features
 
 
+def train(args, sentences, dev_sentences, test_sentences, word_vocab, 
+          pos_vocab, rel_vocab):
+  vocab_size = len(word_vocab)
+  num_relations = len(rel_vocab)
+  num_transitions = 3
+  num_features = 2 if args.decompose_actions else 4
 
+  batch_size = args.batch_size
+
+  # Build the model
+  encoder_model = rnn_encoder.RNNEncoder(vocab_size, 
+      args.embedding_size, args.hidden_size, args.num_layers, args.dropout,
+      args.bidirectional, args.cuda)
+
+  feature_size = (args.hidden_size*2 if args.bidirectional 
+                  else args.hidden_size)
+  #TODO add option for decomposition depending on how it goes
+  if args.decompose_actions:
+    transition_model = binary_classifier.BinaryClassifier(num_features, 
+      feature_size, args.hidden_size, args.cuda) 
+    direction_model = binary_classifier.BinaryClassifier(num_features, 
+      feature_size, args.hidden_size, args.cuda) 
+  else:
+    transition_model = classifier.Classifier(num_features, feature_size, 
+      args.hidden_size, num_transitions, args.cuda) 
+  if args.predict_relations:
+    relation_model = classifier.Classifier(num_features, feature_size, 
+        args.hidden_size, num_relations, args.cuda)
+  else:
+    relation_model = None
+  if args.generative:
+    word_model = classifier.Classifier(num_features, feature_size,
+            args.hidden_size, vocab_size, args.cuda)
+
+  if args.cuda:
+    encoder_model.cuda()
+    transition_model.cuda()
+    if args.predict_relations:
+      relation_model.cuda()
+    if args.generative:
+      word_model.cuda()
+    if args.decompose_actions:
+      direction_model.cuda()
+  criterion = nn.CrossEntropyLoss(size_average=args.criterion_size_average)
+  binary_criterion = nn.BCELoss(size_average=args.criterion_size_average)
+
+  params = (list(encoder_model.parameters()) 
+            + list(transition_model.parameters()))
+  if args.predict_relations:
+    params += list(relation_model.parameters())
+  if args.generative:
+    params += list(word_model.parameters())
+  if args.decompose_actions:
+    params += list(direction_model.parameters())
+
+  optimizer = optim.Adam(params, lr=args.lr)
+ 
+ 
 
 

@@ -17,6 +17,11 @@ _SRE = 1
 _DLA = 0
 _DRA = 1
 
+_LSH = 0
+_LRA = 1
+_URE = 0
+_ULA = 1
+
 _EOS = 0
 
 class ConllEntry:
