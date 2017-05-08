@@ -2,6 +2,7 @@
 # Code credit: Tensorflow seq2seq; BIST parser; pytorch master source
 
 from collections import Counter
+from collections import defaultdict
 from pathlib import Path
 import re
 
@@ -142,7 +143,7 @@ class Vocab:
     return cls(word_list, Counter(dic))
 
 
-def create_length_histogram(sentences):
+def create_length_histogram(sentences, working_path):
   token_count = 0
   missing_token_count = 0
 
@@ -158,7 +159,7 @@ def create_length_histogram(sentences):
             missing_token_count/token_count))
 
   cum_count = 0
-  with open(working_path + 'histogram', 'w') as fh:
+  with open(working_path + '/histogram', 'w') as fh:
     for length in lengths:
       cum_count += sent_length[length]
       fh.write((str(length) + '\t' + str(sent_length[length]) + '\t' 

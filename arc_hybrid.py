@@ -56,7 +56,7 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
     return stackops, directions
 
   def _decode_action_sequence(self, conll, actions, encoder_features, 
-      more_context=False, use_cuda=False):
+      more_context=False):
     """Execute a given action sequence, also find best relations."""
     stack = data_utils.ParseForest([])
     buf = data_utils.ParseForest([conll[0]])
@@ -81,10 +81,10 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
 
       if len(stack) > 1: # allowed to ra or la
         position = nn_utils.extract_feature_positions(buffer_index, s0, s1, s2, more_context)
-        features = nn_utils.select_features(encoder_features, position, use_cuda)
+        features = nn_utils.select_features(encoder_features, position, self.use_cuda)
         
-        if direction_model is not None: 
-          transition_logit = transition_model(features)
+        if self.direction_model is not None: 
+          transition_logit = self.transition_model(features)
           if buffer_index == sent_length:
             assert action == data_utils._RA
             sh_action = data_utils._SRE 
@@ -96,7 +96,7 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
             else:
               sh_action = data_utils._SRE
           if sh_action == data_utils._SRE:
-            direction_logit = direction_model(features)  
+            direction_logit = self.direction_model(features)  
             direction_sigmoid = normalize(direction_logit)
             direction_sigmoid_np = direction_sigmoid.type(torch.FloatTensor).data.numpy()
             if buffer_index == sent_length:
@@ -111,18 +111,18 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
             assert action == data_utils._SH
             direction_logits.append(None)
         else:
-          transition_logit = transition_model(features)
+          transition_logit = self.transition_model(features)
           transition_logit_np = transition_logit.type(torch.FloatTensor).data.numpy()
           if buffer_index == sent_length:
             assert action == data_utils._RA
         
-        if relation_model is not None and action != data_utils._SH:
-          relation_logit = relation_model(features)      
+        if self.relation_model is not None and action != data_utils._SH:
+          relation_logit = self.relation_model(features)      
           relation_logit_np = relation_logit.type(torch.FloatTensor).data.numpy()
           label = int(relation_logit_np.argmax(axis=1)[0])
         
       transition_logits.append(transition_logit)
-      if relation_model is not None:
+      if self.relation_model is not None:
         relation_logits.append(relation_logit)
         labels.append(label)
 
@@ -143,13 +143,13 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
         else:
           stack.roots[-1].children.append(child)
           conll[child.id].pred_parent_id = stack.roots[-1].id
-        if relation_model is not None:
+        if self.relation_model is not None:
           conll[child.id].pred_relation_ind = label
 
     return conll, transition_logits, direction_logits, actions, relation_logits, labels
 
 
-  def viterbi_decode(self, conll, encoder_features, use_cuda=False):
+  def viterbi_decode(self, conll, encoder_features):
     sent_length = len(conll) # includes root, but not EOS
     log_normalize = nn.LogSoftmax()
     binary_normalize = nn.Sigmoid()
@@ -162,18 +162,19 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
     word_log_probs.fill(-np.inf)
 
     # batch feature computation
-    features = nn_utils.batch_feature_selection(encoder_features, seq_length, use_cuda)
-    re_probs_list = nn_utils.to_numpy(binary_normalize(transition_model(features)))
-    ra_probs_list = nn_utils.to_numpy(binary_normalize(direction_model(features)))
-    if word_model is not None:
-      word_dist = log_normalize(word_model(features))
+    features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+        self.use_cuda)
+    re_probs_list = nn_utils.to_numpy(binary_normalize(self.transition_model(features)))
+    ra_probs_list = nn_utils.to_numpy(binary_normalize(self.direction_model(features)))
+    if self.word_model is not None:
+      word_dist = log_normalize(self.word_model(features))
 
     counter = 0 
     for i in range(seq_length-1):
       for j in range(i+1, seq_length):
         reduce_probs[i, j] = re_probs_list[counter, 0]
         ra_probs[i, j] = ra_probs_list[counter, 0]
-        if word_model is not None and j < sent_length:
+        if self.word_model is not None and j < sent_length:
           if j < sent_length - 1:
             word_id = conll[j+1].word_id 
           else:
@@ -189,9 +190,9 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
     directions.fill(data_utils._DRA) # default direction
 
     # first word prob 
-    if word_model is not None:
-      init_features = nn_utils.select_features(encoder_features, [0, 0], use_cuda)
-      word_dist = log_normalize(word_model(init_features).view(-1))
+    if self.word_model is not None:
+      init_features = nn_utils.select_features(encoder_features, [0, 0], self.use_cuda)
+      word_dist = log_normalize(self.word_model(init_features).view(-1))
       table[0, 0, 1] = nn_utils.to_numpy(word_dist[conll[1].word_id])
     else:
       table[0, 0, 1] = 0
@@ -199,7 +200,7 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
     for j in range(2, sent_length+1):
       for i in range(j-1):
         score = np.log(1 - reduce_probs[i, j-1]) 
-        if word_model is not None:
+        if self.word_model is not None:
           score += word_log_probs[i, j-1]
         table[i, j-1, j] = score
       for i in range(j-2, -1, -1):
@@ -208,7 +209,7 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
           block_directions = []
           for k in range(i+1, j):
             score = table[l, i, k] + table[i, k, j] + np.log(reduce_probs[k, j])
-            if direction_model is not None:
+            if self.direction_model is not None:
               ra_prob = ra_probs[k, j]
               if ra_prob > 0.5 or j == sent_length:
                 score += np.log(ra_prob)
@@ -221,7 +222,7 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
           k = ind + i + 1
           table[l, i, j] = block_scores[ind]
           split_indexes[l, i, j] = k
-          if direction_model is not None:
+          if self.direction_model is not None:
             directions[l, i, j] = block_directions[ind]
 
     def backtrack_path(l, i, j):
@@ -236,13 +237,11 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
         return (backtrack_path(l, i, k) + backtrack_path(i, k, j) + [act])
 
     actions = backtrack_path(0, 0, sent_length)
-    print(table[0, 0, sent_length]) # scores should match
-    return self._decode_action_sequence(conll, actions, encoder_features,
-            transition_model, relation_model, direction_model, use_cuda=use_cuda)
+    #print(table[0, 0, sent_length]) # scores should match
+    return self._decode_action_sequence(conll, actions, encoder_features)
 
-#TODO have versions with and without scoring
-  def greedy_decode(self, conll, encoder_features, more_context=False,
-          use_cuda=False):
+  def greedy_decode(self, conll, encoder_features, more_context=False):
+    #TODO have versions with and without scoring
     stack = data_utils.ParseForest([])
     buf = data_utils.ParseForest([conll[0]])
     buffer_index = 0
@@ -268,19 +267,19 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
 
       if len(stack) > 1: # allowed to ra or la
         position = nn_utils.extract_feature_positions(buffer_index, s0, s1, s2, more_context)
-        features = nn_utils.select_features(encoder_features, position, use_cuda)
+        features = nn_utils.select_features(encoder_features, position, self.use_cuda)
         
         #TODO rather score transition and relation jointly for greedy choice
-        if direction_model is not None: # find action from decomposed 
-          transition_logit = transition_model(features)
+        if self.direction_model is not None: # find action from decomposed 
+          transition_logit = self.transition_model(features)
           if buffer_index == sent_length:
             sh_action = data_utils._SRE 
-          else: #TODO check, but instead of sigmoid can just test > 0
+          else: #TODO instead of sigmoid can just test > 0
             transition_sigmoid = normalize(transition_logit)
             transition_sigmoid_np = transition_sigmoid.type(torch.FloatTensor).data.numpy()
             sh_action = int(np.round(transition_sigmoid_np)[0])
           if sh_action == data_utils._SRE:
-            direction_logit = direction_model(features)  
+            direction_logit = self.direction_model(features)  
             direction_sigmoid = normalize(direction_logit)
             direction_sigmoid_np = direction_sigmoid.type(torch.FloatTensor).data.numpy()
             if buffer_index == sent_length:
@@ -296,21 +295,21 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
             action = data_utils._SH
             direction_logits.append(None)
         else:
-          transition_logit = transition_model(features)
+          transition_logit = self.transition_model(features)
           transition_logit_np = transition_logit.type(torch.FloatTensor).data.numpy()
           if buffer_index == sent_length:
             action = data_utils._RA
           else:
             action = int(transition_logit_np.argmax(axis=1)[0])
         
-        if relation_model is not None and action != data_utils._SH:
-          relation_logit = relation_model(features)      
+        if self.relation_model is not None and action != data_utils._SH:
+          relation_logit = self.relation_model(features)      
           relation_logit_np = relation_logit.type(torch.FloatTensor).data.numpy()
           label = int(relation_logit_np.argmax(axis=1)[0])
         
       actions.append(action)
       transition_logits.append(transition_logit)
-      if relation_model is not None:
+      if self.relation_model is not None:
         relation_logits.append(relation_logit)
         labels.append(label)
 
@@ -331,16 +330,15 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
         else:
           stack.roots[-1].children.append(child)
           conll[child.id].pred_parent_id = stack.roots[-1].id
-        if relation_model is not None:
+        if self.relation_model is not None:
           conll[child.id].pred_relation_ind = label
 
     return conll, transition_logits, direction_logits, actions, relation_logits, labels
    
 
-  def inside_score_decode(self, conll, encoder_features, transition_model, word_model,
-      use_cuda=False):
+  def inside_score_decode(self, conll, encoder_features):
     '''Compute inside score for testing, not training.'''
-    assert word_model is not None
+    assert self.word_model is not None
     sent_length = len(conll) # includes root, but not EOS
     log_normalize = nn.LogSoftmax()
     binary_normalize = nn.Sigmoid()
@@ -353,15 +351,16 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
     word_log_probs.fill(-np.inf)
 
     # batch feature computation
-    features = nn_utils.batch_feature_selection(encoder_features, seq_length, use_cuda)
-    re_probs_list = nn_utils.to_numpy(binary_normalize(transition_model(features)))
-    word_dist = log_normalize(word_model(features))
+    features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+        self.use_cuda)
+    re_probs_list = nn_utils.to_numpy(binary_normalize(self.transition_model(features)))
+    word_dist = log_normalize(self.word_model(features))
 
     counter = 0 
     for i in range(seq_length-1):
       for j in range(i+1, seq_length):
         reduce_probs[i, j] = re_probs_list[counter, 0]
-        if word_model is not None and j < sent_length:
+        if self.word_model is not None and j < sent_length:
           if j < sent_length - 1:
             word_id = conll[j+1].word_id 
           else:
@@ -374,9 +373,9 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
     table.fill(-np.inf) # log probabilities
 
     # first word prob 
-    if word_model is not None:
-      init_features = nn_utils.select_features(encoder_features, [0, 0], use_cuda)
-      word_dist = log_normalize(word_model(init_features).view(-1))
+    if self.word_model is not None:
+      init_features = nn_utils.select_features(encoder_features, [0, 0], self.use_cuda)
+      word_dist = log_normalize(self.word_model(init_features).view(-1))
       table[0, 0, 1] = nn_utils.to_numpy(word_dist[conll[1].word_id])
     else:
       table[0, 0, 1] = 0
@@ -384,7 +383,7 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
     for j in range(2, sent_length+1):
       for i in range(j-1):
         score = np.log(1 - reduce_probs[i, j-1]) 
-        if word_model is not None:
+        if self.word_model is not None:
           score += word_log_probs[i, j-1]
         table[i, j-1, j] = score
       for i in range(j-2, -1, -1):
@@ -398,7 +397,7 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
     return table[0, 0, sent_length]
 
 
-  def oracle(self, conll, encoder_features, more_context=False, use_cuda=False):
+  def oracle(self, conll, encoder_features, more_context=False):
     # Training oracle for single parsed sentence
     stack = data_utils.ParseForest([])
     buf = data_utils.ParseForest([conll[0]])
@@ -433,7 +432,7 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
               action = data_utils._RA 
    
       position = nn_utils.extract_feature_positions(buffer_index, s0, s1, s2, more_context) 
-      feature = nn_utils.select_features(encoder_features, position, use_cuda)
+      feature = nn_utils.select_features(encoder_features, position, self.use_cuda)
       features.append(feature)
        
       label = -1 if action == data_utils._SH else stack.roots[-1].relation_id

@@ -30,10 +30,11 @@ class TransitionSystem():
       embedding_size, hidden_size, num_layers, dropout, bidirectional, 
       more_context, predict_relations, generative, decompose_actions,
       batch_size, use_cuda):
+    self.use_cuda = use_cuda
     self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, 
         embedding_size, hidden_size, num_layers, dropout,
         bidirectional, use_cuda)
-
+      
     feature_size = (hidden_size*2 if bidirectional else hidden_size)
     if decompose_actions:
       self.transition_model = binary_classifier.BinaryClassifier(num_features, 
@@ -43,14 +44,18 @@ class TransitionSystem():
     else:
       self.transition_model = classifier.Classifier(num_features, feature_size, 
         hidden_size, num_transitions, use_cuda) 
+
     if predict_relations:
       self.relation_model = classifier.Classifier(num_features, feature_size, 
           hidden_size, num_relations, use_cuda)
     else:
       self.relation_model = None
+      
     if generative:
       self.word_model = classifier.Classifier(num_features, feature_size,
               hidden_size, vocab_size, use_cuda)
+    else:
+      self.word_model = None
 
     if use_cuda:
       self.encoder_model.cuda()

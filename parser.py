@@ -9,7 +9,6 @@ import random
 import sys
 import time
 
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +28,83 @@ import arc_hybrid
 import arc_eager 
 import stack_parser
 
+def training_decode(args, tr_system, dev_sentences, num_transitions,
+    num_relations, epoch):
+  val_batch_size = 1
+  total_loss = 0
+  total_length = 0
+  conll_predicted = []
+
+  criterion = nn.CrossEntropyLoss(size_average=args.criterion_size_average)
+  binary_criterion = nn.BCELoss(size_average=args.criterion_size_average)
+
+  tr_system.encoder_model.eval()
+  normalize = nn.Sigmoid() 
+
+  print('Decoding dev sentences')
+  for val_sent in dev_sentences:
+    sentence_data = nn_utils.get_sentence_batch(val_sent, args.cuda, evaluation=True)
+    encoder_state = tr_system.encoder_model.init_hidden(val_batch_size)
+    encoder_output = tr_system.encoder_model(sentence_data, encoder_state)
+
+    if args.decompose_actions:
+      if args.viterbi_decode:
+
+        predict, transition_logits, direction_logits, actions, relation_logits, labels = tr_system.viterbi_decode(val_sent.conll, encoder_output)
+        #print(actions)
+      else:
+        predict, transition_logits, direction_logits, actions, relation_logits, labels = tr_system.greedy_decode(
+          val_sent.conll, encoder_output)
+    else:
+      predict, transition_logits, _, actions, relation_logits, labels = greedy_decode(
+        val_sent.conll, encoder_output, more_context=args.use_more_features)
+
+    #TODO need to compute word probabilities here
+    for j, token in enumerate(predict):
+      # Convert labels to str
+      if j > 0 and tr_system.relation_model is not None and token.pred_relation_ind >= 0:
+        predict[j].pred_relation = rel_vocab.get_word(token.pred_relation_ind)
+    conll_predicted.append(predict) 
+
+    if args.decompose_actions:
+      actions, directions = tr_system.decompose_transitions(actions)
+
+    # Filter out Nones to get examples for loss, then concatenate
+    if args.decompose_actions:
+      transition_output, action_var = nn_utils.filter_logits(transition_logits,
+          actions, float_var=True, use_cuda=args.cuda)
+      direction_output, dir_var = nn_utils.filter_logits(direction_logits,
+        directions, float_var=True, use_cuda=args.cuda)
+    else:
+      transition_output, action_var = nn_utils.filter_logits(transition_logits,
+         actions, use_cuda=args.cuda)
+
+    total_length += len(val_sent) - 1
+    if transition_output is not None:
+      if args.decompose_actions:
+        tr_loss = binary_criterion(normalize(transition_output.view(-1)),
+                                action_var).data
+        total_loss += tr_loss
+        if direction_output is not None:
+          dir_loss = binary_criterion(normalize(direction_output.view(-1)),
+                                  dir_var).data
+          total_loss += dir_loss
+      else:
+        total_loss += criterion(transition_output.view(-1, num_transitions),
+                                action_var).data
+
+      if args.predict_relations:
+        relation_output, label_var = nn_utils.filter_logits(relation_logits, labels, use_cuda=args.cuda)
+        if relation_output is not None:
+          total_loss += criterion(relation_output.view(-1, num_relations),
+                                  label_var).data
+
+  working_path = args.working_dir + '/'
+  data_utils.write_conll(working_path + args.dev_name + '.' + str(epoch) + '.output.conll', conll_predicted)
+  val_loss = total_loss[0] / total_length
+  return val_loss, total_length
+
+
 def train(args, sentences, dev_sentences, test_sentences, word_vocab, 
           pos_vocab, rel_vocab):
   vocab_size = len(word_vocab)
@@ -39,13 +115,13 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
   # Build the model
   assert args.arc_hybrid or args.arc_eager
   if args.arc_hybrid:
-    tr_system = arc_hybrid_parser.ArcHybridTransitionSystem(vocab_size,
+    tr_system = arc_hybrid.ArcHybridTransitionSystem(vocab_size,
         num_relations, num_features, num_transitions, args.embedding_size, 
         args.hidden_size, args.num_layers, args.dropout, args.bidirectional, 
         args.use_more_features, args.predict_relations, args.generative,
         args.decompose_actions, args.batch_size, args.cuda)
   elif args.arc_eager:
-    tr_system = arc_eager_parser.ArcEagerTransitionSystem(vocab_size,
+    tr_system = arc_eager.ArcEagerTransitionSystem(vocab_size,
         num_relations, num_features, num_transitions, args.embedding_size, 
         args.hidden_size, args.num_layers, args.dropout, args.bidirectional, 
         args.batch_size, args.cuda)
@@ -82,7 +158,6 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
     start_time = time.time()
     for i, train_sent in enumerate(sentences):
       # Training loop
-      print(i)
 
       # sentence encoder
       sentence_data = nn_utils.get_sentence_batch(train_sent, args.cuda)
@@ -98,8 +173,7 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
       encoder_output = tr_system.encoder_model(sentence_data, encoder_state)
 
       actions, words, labels, features = tr_system.oracle(
-          train_sent.conll, encoder_output, args.use_more_features, 
-          use_cuda=args.cuda)
+          train_sent.conll, encoder_output, args.use_more_features)
       
       if args.decompose_actions:
         stack_actions, directions = tr_system.decompose_transitions(actions)
@@ -199,82 +273,31 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
         epoch, len(sentences), global_num_tokens,
         avg_global_loss, math.exp(avg_global_loss)))
 
-    #TODO move to a different method
-    val_batch_size = 1
-    total_loss = 0
-    total_length = 0
-    conll_predicted = []
-    decode_start_time = time.time()
-
-    tr_system.encoder_model.eval()
-    normalize = nn.Sigmoid() 
-    if not args.generative:
-      word_model = None
-  
-    print('Decoding dev sentences')
-    for val_sent in dev_sentences:
-      sentence_data = nn_utils.get_sentence_batch(val_sent, args.cuda, evaluation=True)
-      encoder_state = tr_system.encoder_model.init_hidden(val_batch_size)
-      encoder_output = tr_system.encoder_model(sentence_data, encoder_state)
-  
-      if args.decompose_actions:
-        if args.viterbi_decode: #TODO from here
-          predict, transition_logits, direction_logits, actions, relation_logits, labels = viterbi_decode(
-              val_sent.conll, encoder_output, transition_model, word_model,
-              direction_model, relation_model)
-          print(actions)
-        else:
-          predict, transition_logits, direction_logits, actions, relation_logits, labels = greedy_decode(
-            val_sent.conll, encoder_output, transition_model, relation_model,
-            direction_model, use_cuda=args.cuda)
-      else:
-        predict, transition_logits, _, actions, relation_logits, labels = greedy_decode(
-          val_sent.conll, encoder_output, transition_model, relation_model,
-          more_context=args.use_more_features, use_cuda=args.cuda)
-
-      #TODO need to compute word probabilities here
-      for j, token in enumerate(predict):
-        # Convert labels to str
-        if j > 0 and relation_model is not None and token.pred_relation_ind >= 0:
-          predict[j].pred_relation = rel_vocab.get_word(token.pred_relation_ind)
-      conll_predicted.append(predict) 
-
-      if args.decompose_actions:
-        actions, directions = decompose_transitions(actions)
-
-      # Filter out Nones to get examples for loss, then concatenate
-      if args.decompose_actions:
-        transition_output, action_var = nn_utils.filter_logits(transition_logits,
-            actions, float_var=True, use_cuda=args.cuda)
-        direction_output, dir_var = nn_utils.filter_logits(direction_logits,
-          directions, float_var=True, use_cuda=args.cuda)
-      else:
-        transition_output, action_var = nn_utils.filter_logits(transition_logits,
-           actions, use_cuda=args.cuda)
-
-      total_length += len(val_sent) - 1
-      if transition_output is not None:
-        if args.decompose_actions:
-          tr_loss = binary_criterion(normalize(transition_output.view(-1)),
-                                  action_var).data
-          total_loss += tr_loss
-          if direction_output is not None:
-            dir_loss = binary_criterion(normalize(direction_output.view(-1)),
-                                    dir_var).data
-            total_loss += dir_loss
-        else:
-          total_loss += criterion(transition_output.view(-1, num_transitions),
-                                  action_var).data
-
-        if args.predict_relations:
-          relation_output, label_var = nn_utils.filter_logits(relation_logits, labels, use_cuda=args.cuda)
-          if relation_output is not None:
-            total_loss += criterion(relation_output.view(-1, num_relations),
-                                    label_var).data
-
     working_path = args.working_dir + '/'
-    data_utils.write_conll(working_path + args.dev_name + '.' + str(epoch) + '.output.conll', conll_predicted)
-    val_loss = total_loss[0] / total_length
+    # Saves the model. #TODO save only parameters
+    if args.save_model != '':
+      model_fn = working_path + args.save_model + '_encoder.pt'
+      with open(model_fn, 'wb') as f:
+        torch.save(tr_system.encoder_model, f)
+      model_fn = working_path + args.save_model + '_transition.pt'
+      with open(model_fn, 'wb') as f:
+        torch.save(tr_system.transition_model, f)
+      if args.predict_relations:
+        model_fn = working_path + args.save_model + '_relation.pt'
+        with open(model_fn, 'wb') as f:
+          torch.save(tr_system.relation_model, f)
+      if args.generative:
+        model_fn = working_path + args.save_model + '_word.pt'
+        with open(model_fn, 'wb') as f:
+          torch.save(tr_system.word_model, f)
+      if args.decompose_actions:
+        model_fn = working_path + args.save_model + '_direction.pt'
+        with open(model_fn, 'wb') as f:
+          torch.save(tr_system.direction_model, f)
+
+    decode_start_time = time.time()
+    val_loss, total_length = training_decode(args, tr_system, dev_sentences, 
+        num_transitions, num_relations, epoch)
     print('-' * 89)
     print('| end of epoch {:3d} | time: {:5.2f}s | {:5d} tokens | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
         epoch, (time.time() - epoch_start_time), total_length, val_loss,
@@ -282,26 +305,6 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
     print('decoding time: {:5.2f}s'.format(time.time() - decode_start_time))
     print('-' * 89)
 
-    # save the model #TODO save only parameters
-    if args.save_model != '':
-      model_fn = working_path + args.save_model + '_encoder.pt'
-      with open(model_fn, 'wb') as f:
-        torch.save(encoder_model, f)
-      model_fn = working_path + args.save_model + '_transition.pt'
-      with open(model_fn, 'wb') as f:
-        torch.save(transition_model, f)
-      if relation_model is not None:
-        model_fn = working_path + args.save_model + '_relation.pt'
-        with open(model_fn, 'wb') as f:
-          torch.save(relation_model, f)
-      if args.generative:
-        model_fn = working_path + args.save_model + '_word.pt'
-        with open(model_fn, 'wb') as f:
-          torch.save(word_model, f)
-      if args.decompose_actions:
-        model_fn = working_path + args.save_model + '_direction.pt'
-        with open(model_fn, 'wb') as f:
-          torch.save(direction_model, f)
 
 
 def score(args, dev_sentences, test_sentences, word_vocab, pos_vocab, 
@@ -664,10 +667,10 @@ if __name__=='__main__':
         replicate_rnng=args.replicate_rnng_data,
         max_length=args.max_sentence_length)
 
-  data_utils.create_length_histogram(sentences)
+  #data_utils.create_length_histogram(sentences, args.working_dir)
 
   if args.small_data:
-    sentences = sentences[:500]
+    sentences = sentences[:200]
     dev_sentences = dev_sentences[:100]
 
   if args.decode:          
