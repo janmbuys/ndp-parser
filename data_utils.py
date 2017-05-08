@@ -389,7 +389,7 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path,
     for j, node in enumerate(sent): 
       sent[j].relation_id = rel_vocab.get_id(node.relation) 
       sent[j].word_id = word_vocab.get_id(node.norm) 
-    if len(sent) <= max_length: #TODO temp hard restriction
+    if max_length <= 0 or len(sent) <= max_length:
       parse_sentences.append(ParseSentence.from_vocab_conll(sent, word_vocab))
 
   write_text(working_path + conll_name + '.txt', parse_sentences)
@@ -416,7 +416,7 @@ def read_sentences_given_vocab(conll_path, conll_name, working_path,
                                            replicate_rnng)
         sentence[j].relation_id = rel_vocab.get_id(node.relation) 
         sentence[j].word_id = word_vocab.get_id(node.norm) 
-      if len(sentence) <= max_length: #TODO temp hard restriction
+      if max_length <= 0 or len(sent) <= max_length:
         sentences.append(ParseSentence.from_vocab_conll(sentence, word_vocab))
 
   txt_filename = working_path + conll_name + '.txt'
