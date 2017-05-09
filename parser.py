@@ -28,8 +28,7 @@ import arc_hybrid
 import arc_eager 
 import stack_parser
 
-def training_decode(args, tr_system, dev_sentences, num_transitions,
-    num_relations, epoch):
+def training_decode(args, tr_system, dev_sentences, num_relations, epoch):
   val_batch_size = 1
   total_loss = 0
   total_length = 0
@@ -56,8 +55,8 @@ def training_decode(args, tr_system, dev_sentences, num_transitions,
         predict, transition_logits, direction_logits, actions, relation_logits, labels = tr_system.greedy_decode(
           val_sent.conll, encoder_output)
     else:
-      predict, transition_logits, _, actions, relation_logits, labels = greedy_decode(
-        val_sent.conll, encoder_output, more_context=args.use_more_features)
+      predict, transition_logits, _, actions, relation_logits, labels = tr_system.greedy_decode(
+        val_sent.conll, encoder_output)
 
     #TODO need to compute word probabilities here
     for j, token in enumerate(predict):
@@ -90,8 +89,8 @@ def training_decode(args, tr_system, dev_sentences, num_transitions,
                                   dir_var).data
           total_loss += dir_loss
       else:
-        total_loss += criterion(transition_output.view(-1, num_transitions),
-                                action_var).data
+        total_loss += criterion(transition_output.view(-1, 
+          tr_system.num_transitions), action_var).data
 
       if args.predict_relations:
         relation_output, label_var = nn_utils.filter_logits(relation_logits, labels, use_cuda=args.cuda)
@@ -109,22 +108,21 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
           pos_vocab, rel_vocab):
   vocab_size = len(word_vocab)
   num_relations = len(rel_vocab)
-  num_transitions = 3
-  num_features = 2 if args.decompose_actions else 4
 
   # Build the model
   assert args.arc_hybrid or args.arc_eager
   if args.arc_hybrid:
     tr_system = arc_hybrid.ArcHybridTransitionSystem(vocab_size,
-        num_relations, num_features, num_transitions, args.embedding_size, 
+        num_relations, args.embedding_size, 
         args.hidden_size, args.num_layers, args.dropout, args.bidirectional, 
         args.use_more_features, args.predict_relations, args.generative,
         args.decompose_actions, args.batch_size, args.cuda)
   elif args.arc_eager:
     tr_system = arc_eager.ArcEagerTransitionSystem(vocab_size,
-        num_relations, num_features, num_transitions, args.embedding_size, 
+        num_relations, args.embedding_size, 
         args.hidden_size, args.num_layers, args.dropout, args.bidirectional, 
-        args.batch_size, args.cuda)
+        args.use_more_features, args.predict_relations, args.generative,
+        args.decompose_actions, args.batch_size, args.cuda)
 
   criterion = nn.CrossEntropyLoss(size_average=args.criterion_size_average)
   binary_criterion = nn.BCELoss(size_average=args.criterion_size_average)
@@ -173,10 +171,12 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
       encoder_output = tr_system.encoder_model(sentence_data, encoder_state)
 
       actions, words, labels, features = tr_system.oracle(
-          train_sent.conll, encoder_output, args.use_more_features)
+          train_sent.conll, encoder_output)
       
       if args.decompose_actions:
         stack_actions, directions = tr_system.decompose_transitions(actions)
+      else:
+        stack_actions = tr_system.map_transitions(actions)
 
       # when will the direction logits be none? -> from features
       # but 2-features will be used for both sh and re
@@ -197,7 +197,7 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
         transition_logits = [tr_system.transition_model(feat) if feat is not None
                              else None for feat in features] 
         transition_output, action_var = nn_utils.filter_logits(transition_logits,
-            actions, use_cuda=args.cuda)
+            stack_actions, use_cuda=args.cuda)
       
       if args.predict_relations:
         relation_logits = []
@@ -232,7 +232,7 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
 
       else:
         if transition_output is not None:
-          loss = criterion(transition_output.view(-1, num_transitions),
+          loss = criterion(transition_output.view(-1, tr_system.num_transitions),
                          action_var)
        
       if args.predict_relations and relation_output is not None:
@@ -297,7 +297,7 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
 
     decode_start_time = time.time()
     val_loss, total_length = training_decode(args, tr_system, dev_sentences, 
-        num_transitions, num_relations, epoch)
+        num_relations, epoch)
     print('-' * 89)
     print('| end of epoch {:3d} | time: {:5.2f}s | {:5d} tokens | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
         epoch, (time.time() - epoch_start_time), total_length, val_loss,
@@ -306,7 +306,7 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
     print('-' * 89)
 
 
-
+#TODO update
 def score(args, dev_sentences, test_sentences, word_vocab, pos_vocab, 
           rel_vocab):
   vocab_size = len(word_vocab)
@@ -337,7 +337,6 @@ def score(args, dev_sentences, test_sentences, word_vocab, pos_vocab,
     with open(model_fn, 'rb') as f:
       direction_model = torch.load(f)
 
-  #TODO not sure if this is neccessary
   if args.cuda:
     encoder_model.cuda()
     transition_model.cuda()
@@ -390,7 +389,7 @@ def score(args, dev_sentences, test_sentences, word_vocab, pos_vocab,
        (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
   print('-' * 89)
 
-
+#TODO update
 def decode(args, dev_sentences, test_sentences, word_vocab, pos_vocab, 
            rel_vocab):
   vocab_size = len(word_vocab)
@@ -421,7 +420,6 @@ def decode(args, dev_sentences, test_sentences, word_vocab, pos_vocab,
     with open(model_fn, 'rb') as f:
       direction_model = torch.load(f)
 
-  #TODO not sure if this is neccessary
   if args.cuda:
     encoder_model.cuda()
     transition_model.cuda()
@@ -470,7 +468,7 @@ def decode(args, dev_sentences, test_sentences, word_vocab, pos_vocab,
     else:
       predict, transition_logits, _, actions, relation_logits, labels = greedy_decode(
         val_sent.conll, encoder_output, transition_model, relation_model,
-        more_context=args.use_more_features, use_cuda=args.cuda)
+        use_cuda=args.cuda)
 
     for j, token in enumerate(predict):
       # Convert labels to str
@@ -670,7 +668,7 @@ if __name__=='__main__':
   #data_utils.create_length_histogram(sentences, args.working_dir)
 
   if args.small_data:
-    sentences = sentences[:200]
+    sentences = sentences[:100]
     dev_sentences = dev_sentences[:100]
 
   if args.decode:          

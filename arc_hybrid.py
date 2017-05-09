@@ -27,16 +27,23 @@ import nn_utils
 import transition_system as tr
 
 class ArcHybridTransitionSystem(tr.TransitionSystem):
-  def __init__(self, vocab_size, num_relations, num_features, num_transitions,
+  def __init__(self, vocab_size, num_relations, 
       embedding_size, hidden_size, num_layers, dropout, bidirectional, 
       more_context, predict_relations, generative, decompose_actions,
       batch_size, use_cuda):
+    assert not (more_context and decompose_actions)
+    num_transitions = 3
+    num_features = 4 if more_context else 2
     super(ArcHybridTransitionSystem, self).__init__(vocab_size, num_relations,
         num_features, num_transitions,
         embedding_size, hidden_size, num_layers, dropout, bidirectional,
-        more_context, predict_relations, generative, decompose_actions,
-        batch_size, use_cuda)
+        predict_relations, generative, decompose_actions, batch_size, 
+        use_cuda)
+    self.more_context = more_context
     self.generate_actions = [data_utils._SH]
+
+  def map_transitions(self, actions):
+    return [act for act in actions]
 
   def decompose_transitions(self, actions):
     stackops = []
@@ -55,8 +62,7 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
     
     return stackops, directions
 
-  def _decode_action_sequence(self, conll, actions, encoder_features, 
-      more_context=False):
+  def _decode_action_sequence(self, conll, actions, encoder_features):
     """Execute a given action sequence, also find best relations."""
     stack = data_utils.ParseForest([])
     buf = data_utils.ParseForest([conll[0]])
@@ -80,7 +86,8 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
       s2 = stack.roots[-3].id if len(stack) > 2 else 0
 
       if len(stack) > 1: # allowed to ra or la
-        position = nn_utils.extract_feature_positions(buffer_index, s0, s1, s2, more_context)
+        position = nn_utils.extract_feature_positions(buffer_index, s0, s1, s2,
+            self.more_context)
         features = nn_utils.select_features(encoder_features, position, self.use_cuda)
         
         if self.direction_model is not None: 
@@ -240,7 +247,7 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
     #print(table[0, 0, sent_length]) # scores should match
     return self._decode_action_sequence(conll, actions, encoder_features)
 
-  def greedy_decode(self, conll, encoder_features, more_context=False):
+  def greedy_decode(self, conll, encoder_features):
     #TODO have versions with and without scoring
     stack = data_utils.ParseForest([])
     buf = data_utils.ParseForest([conll[0]])
@@ -266,7 +273,8 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
       s2 = stack.roots[-3].id if len(stack) > 2 else 0
 
       if len(stack) > 1: # allowed to ra or la
-        position = nn_utils.extract_feature_positions(buffer_index, s0, s1, s2, more_context)
+        position = nn_utils.extract_feature_positions(buffer_index, s0, s1, s2,
+            self.more_context)
         features = nn_utils.select_features(encoder_features, position, self.use_cuda)
         
         #TODO rather score transition and relation jointly for greedy choice
@@ -397,8 +405,8 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
     return table[0, 0, sent_length]
 
 
-  def oracle(self, conll, encoder_features, more_context=False):
-    # Training oracle for single parsed sentence
+  def oracle(self, conll, encoder_features):
+    # Training oracle for single parsed sentence.
     stack = data_utils.ParseForest([])
     buf = data_utils.ParseForest([conll[0]])
     buffer_index = 0
@@ -431,7 +439,8 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
             if len(stack.roots[-1].children) == num_children[s0]:
               action = data_utils._RA 
    
-      position = nn_utils.extract_feature_positions(buffer_index, s0, s1, s2, more_context) 
+      position = nn_utils.extract_feature_positions(buffer_index, s0, s1, s2,
+          self.more_context) 
       feature = nn_utils.select_features(encoder_features, position, self.use_cuda)
       features.append(feature)
        

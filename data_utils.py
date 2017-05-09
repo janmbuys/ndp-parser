@@ -18,6 +18,10 @@ _SRE = 1
 _DLA = 0
 _DRA = 1
 
+_ESH = 0
+_ERA = 1
+_ERE = 2
+
 _LSH = 0
 _LRA = 1
 _URE = 0

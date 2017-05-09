@@ -28,9 +28,10 @@ import nn_utils
 class TransitionSystem():
   def __init__(self, vocab_size, num_relations, num_features, num_transitions,
       embedding_size, hidden_size, num_layers, dropout, bidirectional, 
-      more_context, predict_relations, generative, decompose_actions,
-      batch_size, use_cuda):
+      predict_relations, generative, decompose_actions, batch_size, use_cuda):
     self.use_cuda = use_cuda
+    self.num_features = num_features
+    self.num_transitions = num_transitions
     self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, 
         embedding_size, hidden_size, num_layers, dropout,
         bidirectional, use_cuda)
