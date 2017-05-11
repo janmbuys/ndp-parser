@@ -352,6 +352,51 @@ def read_conll(fh, projectify, replicate_rnng=False):
   print('%d dropped non-projective sentences.' % dropped)
   print('%d sentences read.' % read)
 
+def read_sentences_txt_given_fixed_vocab(txt_path, txt_name, working_path):
+  word_vocab = Vocab.read_count_vocab(working_path + 'vocab')
+  form_vocab = word_vocab.form_vocab()
+
+  print('reading')
+  sentences = []
+  with open(txt_path + txt_name + '.txt', 'r') as txtFP:
+    for line in txtFP:
+      root = ConllEntry(0, '*root*', '_', '_')
+      tokens = [root]
+      for word in line.split():
+        tokens.append(ConllEntry(len(tokens), word, '_', '_'))
+      for j, node in enumerate(tokens):
+        assert node.form in form_vocab
+        tokens[j].word_id = word_vocab.get_id(node.form)   
+      sentences.append(ParseSentence.from_vocab_conll(tokens, word_vocab))
+
+  print('%d sentences read' % len(sentences))
+  return (sentences, word_vocab)
+
+
+def read_sentences_txt_fixed_vocab(txt_path, txt_name, working_path):
+  wordsCount = Counter()
+
+  conll_sentences = []
+  with open(txt_path + txt_name + '.txt', 'r') as txtFP:
+    for line in txtFP:
+      root = ConllEntry(0, '*root*', '_', '_')
+      tokens = [root]
+      for word in line.split():
+        tokens.append(ConllEntry(len(tokens), word, '_', '_'))
+      wordsCount.update([node.form for node in tokens])
+      conll_sentences.append(tokens)
+  print('%d sentences read' % len(conll_sentences))
+  word_vocab = Vocab.from_counter(wordsCount, add_eos=True)
+  word_vocab.write_count_vocab(working_path + 'vocab', add_eos=True)
+
+  parse_sentences = []
+  for sent in conll_sentences:
+    for j, node in enumerate(sent): 
+      sent[j].word_id = word_vocab.get_id(node.norm) 
+    parse_sentences.append(ParseSentence.from_vocab_conll(sent, word_vocab))
+  
+  return (parse_sentences, word_vocab)
+
 
 def read_sentences_create_vocab(conll_path, conll_name, working_path,
     projectify=False, replicate_rnng=False, max_length=-1): 

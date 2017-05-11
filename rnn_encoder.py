@@ -36,7 +36,9 @@ class RNNEncoder(nn.Module):
     else:
       return (Variable(w1), Variable(w2))
     
-  def forward(self, inp, hidden):
+  def forward(self, inp, hidden): 
+    # inp: tuple of (seq length, batch_size)
+    # hidden: tuple of (layers, batch_size, hidden_size)
     emb = self.drop(self.embed(inp))
     output, hidden = self.rnn(emb, hidden)
     output = self.drop(output)

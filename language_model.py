@@ -57,6 +57,8 @@ if __name__=='__main__':
                       default=False)
   parser.add_argument('--reset_vocab', action='store_true', 
                       default=False)
+  parser.add_argument('--txt_data_fixed_vocab', action='store_true', 
+                      default=False)
 
   parser.add_argument('--embedding_size', type=int, default=128,
                       help='size of word embeddings')
@@ -68,6 +70,19 @@ if __name__=='__main__':
                       help='initial learning rate')
   parser.add_argument('--grad_clip', type=float, default=5, # default 0.5 check
                       help='gradient clipping')
+  parser.add_argument('--num_init_lr_epochs', type=int, default=-1, 
+                      help='number of epochs before learning rate decay')
+  parser.add_argument('--patience', type=int, default=3, 
+                      help='Stop training if not improving for some number of epochs')
+  parser.add_argument('--lr_decay', type=float, default=1.1,
+                      help='learning rate decay per epoch')
+  parser.add_argument('--tie_weights', action='store_true',
+                      help='tie the word embedding and softmax weights')
+  parser.add_argument('--xavier_init', action='store_true',
+                      help='Xavier initialization')
+  parser.add_argument('--init_weight_range', type=float, default=0.1,
+                      help='weight initialization range')
+
   parser.add_argument('--dropout', type=float, default=0.0, 
                       help='dropout rate')
   parser.add_argument('--epochs', type=int, default=100,
@@ -76,6 +91,8 @@ if __name__=='__main__':
                       help='batch size') # original default 20
   parser.add_argument('--bptt', type=int, default=20, # not using now
                       help='sequence length')
+  parser.add_argument('--adam', action='store_true',
+                      help='use Adam optimizer')
 
   parser.add_argument('--cuda', action='store_true',
                       help='use CUDA')
@@ -101,9 +118,11 @@ if __name__=='__main__':
   working_path = args.working_dir + '/'
 
   # Prepare training data
-
   vocab_path = Path(data_working_path + 'vocab')
-  if vocab_path.is_file() and not args.reset_vocab:
+  if args.txt_data_fixed_vocab: # assume that way vocab is constructed won't change
+    sentences, word_vocab = data_utils.read_sentences_txt_fixed_vocab(
+        data_path, args.train_name, data_working_path)
+  elif vocab_path.is_file() and not args.reset_vocab:
     sentences, word_vocab, _, _ = data_utils.read_sentences_given_vocab(
         data_path, args.train_name, data_working_path, projectify=True, 
         replicate_rnng=args.replicate_rnng_data)
@@ -114,17 +133,23 @@ if __name__=='__main__':
         replicate_rnng=args.replicate_rnng_data)
 
   # Read dev and test files with given vocab
-  dev_sentences, _, _, _ = data_utils.read_sentences_given_vocab(
+  if args.txt_data_fixed_vocab:
+    dev_sentences, _ = data_utils.read_sentences_txt_given_fixed_vocab(
+        data_path, args.dev_name, data_working_path)
+    test_sentences, _ = data_utils.read_sentences_txt_given_fixed_vocab(
+        data_path, args.test_name, data_working_path)
+  else:
+    dev_sentences, _, _, _ = data_utils.read_sentences_given_vocab(
         data_path, args.dev_name, data_working_path, projectify=False, 
         replicate_rnng=args.replicate_rnng_data)
 
-  test_sentences, _,  _, _ = data_utils.read_sentences_given_vocab(
+    test_sentences, _,  _, _ = data_utils.read_sentences_given_vocab(
         data_path, args.test_name, data_working_path, projectify=False, 
         replicate_rnng=args.replicate_rnng_data)
 
   if args.small_data:
-    sentences = sentences[:500]
-    dev_sentences = dev_sentences[:100]
+    sentences = sentences[:1000]
+    dev_sentences = dev_sentences #[:100]
 
   #data_utils.create_length_histogram(sentences)
 
@@ -135,16 +160,21 @@ if __name__=='__main__':
 
     # Build the model
     model = rnn_lm.RNNLM(vocab_size, args.embedding_size,
-      args.hidden_size, args.num_layers, args.dropout, args.cuda)
+      args.hidden_size, args.num_layers, args.dropout, 
+      args.init_weight_range, args.xavier_init, args.tie_weights, args.cuda)
     if args.cuda:
       model.cuda()
 
     criterion = nn.CrossEntropyLoss(size_average=False)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    if args.adam:
+      optimizer = optim.Adam(model.parameters(), lr=lr)
+    else:
+      optimizer = optim.SGD(model.parameters(), lr=lr)
 
     # Loop over epochs.
     # Sentence iid, batch size 1 training.
     prev_val_loss = None
+    patience_count = 0
     for epoch in range(1, args.epochs+1):
       epoch_start_time = time.time()
       random.shuffle(sentences)
@@ -195,31 +225,63 @@ if __name__=='__main__':
       # Evaluate
       val_batch_size = 1
       total_loss = 0
+      total_loss_direct = 0
       total_length = 0
+      total_length_more = 0
       model.eval()
+      log_normalize = nn.LogSoftmax()
+      calculate_direct = False
+
       for val_sent in dev_sentences:
         hidden_state = model.init_hidden(val_batch_size)
         data, targets = get_sentence_batch(val_sent, args.cuda, evaluation=True)
         output, hidden_state = model(data, hidden_state)
         output_flat = output.view(-1, vocab_size)
         total_loss += criterion(output_flat, targets).data
+        assert output_flat.size()[0] == len(val_sent)
+        # direct loss calculation
+        if calculate_direct:
+          word_ids = [int(x) for x in targets.view(-1).data]
+          word_dist_list = log_normalize(output_flat)
+          for i, word_id in enumerate(word_ids):
+            total_loss_direct -= nn_utils.to_numpy(word_dist_list[i, word_id])
         total_length += len(val_sent) - 1 
+        total_length_more += len(val_sent) 
+
       val_loss = total_loss[0] / total_length
+      val_loss_more = total_loss[0] / total_length_more
+      if calculate_direct:
+        val_loss_direct = total_loss_direct[0] / total_length
 
       print('| end of epoch {:3d} | time: {:5.2f}s | {:5d} tokens | valid loss {:5.2f} | '
               'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
                                          total_length, val_loss, math.exp(val_loss)))
+      print('                     | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(val_loss_more,
+          math.exp(val_loss_more)))
+      if calculate_direct:
+        print('                   | valid loss direct {:5.2f} | valid ppl {:8.2f}'.format(val_loss_direct, math.exp(val_loss_direct)))
+
       print('-' * 89)
       # Anneal the learning rate.
-      # TODO check if I was actually doing this
-      #if prev_val_loss and val_loss > prev_val_loss:
-      #  lr /= 4
-      prev_val_loss = val_loss
-
-      # save the model
-      if args.save_model != '':
-        model_fn = working_path + args.save_model
-        with open(model_fn, 'wb') as f:
-          torch.save(model, f)
+      if (not args.adam and args.num_init_lr_epochs > 0 
+          and epoch >= args.num_init_lr_epochs):
+        if prev_val_loss and val_loss > prev_val_loss:
+          lr /= 4
+        else:
+          lr = lr / args.lr_decay
+        for param_group in optimizer.param_groups:
+          param_group['lr'] = lr
+      if prev_val_loss and val_loss > prev_val_loss:
+        patience_count += 1
+      else:
+        patience_count = 0
+        prev_val_loss = val_loss
+        # save the model
+        if args.save_model != '':
+          model_fn = working_path + args.save_model
+          with open(model_fn, 'wb') as f:
+            torch.save(model, f)
+      if args.patience > 0 and patience_count >= args.patience:
+        break
 
   train()
