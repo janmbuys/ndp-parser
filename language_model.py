@@ -23,15 +23,16 @@ import rnn_lm
 import data_utils
 import nn_utils
 
-def get_sentence_batch(source, use_cuda, evaluation=False):
+def get_sentence_batch(source_list, use_cuda, evaluation=False):
+  data_ts = torch.cat([source.word_tensor[:-1] for source in source_list], 1)
+  target_ts = torch.cat([source.word_tensor[1:] for source in source_list], 1)
   if use_cuda:
-    data = Variable(source.word_tensor[:-1], volatile=evaluation).cuda()
-    target = Variable(source.word_tensor[1:].view(-1)).cuda()
+    data = Variable(data_ts, volatile=evaluation).cuda()
+    target = Variable(target_ts.view(-1)).cuda()
   else:
-    data = Variable(source.word_tensor[:-1], volatile=evaluation)
-    target = Variable(source.word_tensor[1:].view(-1))
+    data = Variable(data_ts, volatile=evaluation)
+    target = Variable(target_ts.view(-1))
   return data, target
-
 
 if __name__=='__main__':
   parser = argparse.ArgumentParser()
@@ -78,6 +79,8 @@ if __name__=='__main__':
                       help='learning rate decay per epoch')
   parser.add_argument('--tie_weights', action='store_true',
                       help='tie the word embedding and softmax weights')
+  parser.add_argument('--reduce_lr', action='store_true',
+                      help='reduce lr if val ppl does not improve')
   parser.add_argument('--xavier_init', action='store_true',
                       help='Xavier initialization')
   parser.add_argument('--init_weight_range', type=float, default=0.1,
@@ -88,7 +91,7 @@ if __name__=='__main__':
   parser.add_argument('--epochs', type=int, default=100,
                       help='upper epoch limit')
   parser.add_argument('--batch_size', type=int, default=1, metavar='N',
-                      help='batch size') # original default 20
+                      help='batch size') 
   parser.add_argument('--bptt', type=int, default=20, # not using now
                       help='sequence length')
   parser.add_argument('--adam', action='store_true',
@@ -156,7 +159,7 @@ if __name__=='__main__':
   def train():
     lr = args.lr
     vocab_size = len(word_vocab)
-    batch_size = 1
+    batch_size = args.batch_size
 
     # Build the model
     model = rnn_lm.RNNLM(vocab_size, args.embedding_size,
@@ -178,18 +181,32 @@ if __name__=='__main__':
     for epoch in range(1, args.epochs+1):
       epoch_start_time = time.time()
       random.shuffle(sentences)
+      sentences.sort(key=len) 
       model.train()
       total_loss = 0
       total_num_tokens = 0
       global_loss = 0
       global_num_tokens = 0
+      batch_count = 0
 
       start_time = time.time()
-      for i, train_sent in enumerate(sentences):
+      i = 0  
+      while i < len(sentences):
         # Training loop
-        data, targets = get_sentence_batch(train_sent, args.cuda)
+        length = len(sentences[i])
+        j = i + 1
+        while (j < len(sentences) and len(sentences[j]) == length
+               and (j - i) < batch_size):
+          j += 1
+        # dimensions [length x batch]
+        data, targets = get_sentence_batch(
+            [sentences[k] for k in range(i, j)], args.cuda)
+        local_batch_size = j - i
+        i = j
+        batch_count += 1
+
         model.zero_grad()
-        hidden_state = model.init_hidden(batch_size)
+        hidden_state = model.init_hidden(local_batch_size)
         output, hidden_state = model(data, hidden_state)
         loss = criterion(output.view(-1, vocab_size), targets)
         loss.backward()
@@ -197,29 +214,29 @@ if __name__=='__main__':
         if args.grad_clip > 0:
           nn_utils.clip_grad_norm(model.parameters(), args.grad_clip)
         optimizer.step() 
-        #for p in model.parameters():
-        #  p.data.add_(-lr, p.grad.data)
         total_loss += loss.data
         global_loss += loss.data
-        total_num_tokens += len(train_sent) - 1 
-        global_num_tokens += len(train_sent) - 1 
 
-        if i % args.logging_interval == 0 and i > 0:
+        batch_tokens = (data.size()[0] - 1)*local_batch_size
+        total_num_tokens += batch_tokens
+        global_num_tokens += batch_tokens
+
+        if batch_count % args.logging_interval == 0 and i > 0:
           cur_loss = total_loss[0] / total_num_tokens
           elapsed = time.time() - start_time
-          print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.2f} | ms/batch {:5.2f} | '
+          print('| epoch {:3d} | {:5d} batches | lr {:02.4f} | ms/batch {:5.2f} | '
                   'loss {:5.2f} | ppl {:8.2f}'.format(
-              epoch, i, len(sentences), lr,
+              epoch, batch_count, lr,
               elapsed * 1000 / args.logging_interval, cur_loss, 
               math.exp(cur_loss)))
           total_loss = 0
           total_num_tokens = 0
           start_time = time.time()
-      
-      avg_global_loss = global_loss[0] / global_num_tokens
+        
+        avg_global_loss = global_loss[0] / global_num_tokens
       print('-' * 89)
       print('| end of epoch {:3d} | {:5d} batches | tokens {:5d} | loss {:5.2f} | ppl {:8.2f}'.format(
-              epoch, len(sentences), global_num_tokens,
+              epoch, batch_count, global_num_tokens,
               avg_global_loss, math.exp(avg_global_loss)))
 
       # Evaluate
@@ -234,7 +251,7 @@ if __name__=='__main__':
 
       for val_sent in dev_sentences:
         hidden_state = model.init_hidden(val_batch_size)
-        data, targets = get_sentence_batch(val_sent, args.cuda, evaluation=True)
+        data, targets = get_sentence_batch([val_sent], args.cuda, evaluation=True)
         output, hidden_state = model(data, hidden_state)
         output_flat = output.view(-1, vocab_size)
         total_loss += criterion(output_flat, targets).data
@@ -265,7 +282,7 @@ if __name__=='__main__':
       # Anneal the learning rate.
       if (not args.adam and args.num_init_lr_epochs > 0 
           and epoch >= args.num_init_lr_epochs):
-        if prev_val_loss and val_loss > prev_val_loss:
+        if args.reduce_lr and val_loss > prev_val_loss:
           lr /= 4
         else:
           lr = lr / args.lr_decay
