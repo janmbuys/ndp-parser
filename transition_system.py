@@ -45,6 +45,7 @@ class TransitionSystem():
     else:
       self.transition_model = classifier.Classifier(num_features, feature_size, 
         hidden_size, num_transitions, use_cuda) 
+      self.direction_model = None
 
     if predict_relations:
       self.relation_model = classifier.Classifier(num_features, feature_size, 

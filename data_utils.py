@@ -421,7 +421,7 @@ def read_sentences_given_vocab(conll_path, conll_name, working_path,
                                            replicate_rnng)
         sentence[j].relation_id = rel_vocab.get_id(node.relation) 
         sentence[j].word_id = word_vocab.get_id(node.norm) 
-      if max_length <= 0 or len(sent) <= max_length:
+      if max_length <= 0 or len(sentence) <= max_length:
         sentences.append(ParseSentence.from_vocab_conll(sentence, word_vocab))
 
   txt_filename = working_path + conll_name + '.txt'

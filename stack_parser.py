@@ -145,6 +145,7 @@ def train_unsup(args, sentences, dev_sentences, test_sentences, word_vocab):
       sentence_data = nn_utils.get_sentence_batch(train_sent, args.cuda)
       
       loss = stack_model.neg_log_likelihood(sentence_data)
+      #print(loss)
 
       if loss is not None:
         loss.backward()
@@ -204,14 +205,13 @@ def train_unsup(args, sentences, dev_sentences, test_sentences, word_vocab):
       sentence_data = nn_utils.get_sentence_batch(val_sent, args.cuda,
           evaluation=True)
       transition_logits, actions, shift_dependents, reduce_dependents = stack_model.forward(sentence_data)
-      action_str =  ' '.join(['SH' if act == 0 else 'RE' for act in actions])
-      print(action_str)
-      print('shift_dependents') 
-      print(shift_dependents) 
-      print('reduce_dependents') 
-      print(reduce_dependents) 
+      #action_str =  ' '.join(['SH' if act == 0 else 'RE' for act in actions])
+      #print(action_str)
+      #print('shift_dependents') 
+      #print(shift_dependents) 
+      #print('reduce_dependents') 
+      #print(reduce_dependents) 
       #TODO print output, easiest is to define class in data_utils
-    
 
     val_loss = 0
     print('| decode time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(

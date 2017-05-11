@@ -42,6 +42,12 @@ def log_sum_exp(vec):
     max_score_broadcast = max_score.view(1, -1).expand(1, vec.size()[1])
     return max_score + torch.log(torch.sum(torch.exp(vec - max_score_broadcast)))
 
+def log_sum_exp_2d(vec):
+    max_score, _ = torch.max(vec, 1) 
+    #max_score = vec[0, np.argmax(vec, 1)]
+    max_score_broadcast = max_score.view(-1, 1).expand(vec.size())
+    return max_score + torch.log(torch.sum(
+        torch.exp(vec - max_score_broadcast), 1))
 
 def select_features(input_features, indexes, use_cuda=False):
   if use_cuda:
@@ -89,8 +95,10 @@ def filter_logits(logits, targets, float_var=False, use_cuda=False):
     # should be predicted
     if logit is not None and target is not None: 
       logits_filtered.append(logit)
+      assert target >= 0
       targets_filtered.append(target)
 
+  #print(targets_filtered)
   if logits_filtered:
     if use_cuda:
       if float_var:

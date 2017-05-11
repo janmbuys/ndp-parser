@@ -82,6 +82,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     buf = data_utils.ParseForest([conll[0]])
     buffer_index = 0
     sent_length = len(conll)
+    #print(sent_length)
 
     actions = []
     labels = []
@@ -94,7 +95,8 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
       transition_logit = None
       relation_logit = None
 
-      action = data_utils._ESH
+      action = data_utils._SH
+      pred_action = data_utils._ESH
       label = -1
       s0 = stack.roots[-1].id if len(stack) > 0 else 0
 
@@ -104,38 +106,46 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
         transition_logit = self.transition_model(features)
         transition_logit_np = transition_logit.type(torch.FloatTensor).data.numpy()
         if buffer_index == sent_length:
-          action = data_utils._ERE
+          pred_action = data_utils._ERE
         else:
           #if stack_has_parent[-1]:
           #  transition_logit_np[0, data_utils._LA] = -np.inf
           #else:
           #  transition_logit_np[0, data_utils._RE] = -np.inf
-          action = int(transition_logit_np.argmax(axis=1)[0])
+          pred_action = int(transition_logit_np.argmax(axis=1)[0])
           transition_logits.append(transition_logit)
 
-        #TODO alternative is to map to full transition here
-        if (self.relation_model is not None 
-            and (action == data_utils._ERA or action == data_utils._ERE)):
+        if pred_action == data_utils._ESH:
+          action = data_utils._SH
+        elif pred_action == data_utils._ERA:
+          action = data_utils._RA
+        elif stack_has_parent[-1] or buffer_index == sent_length:
+          action = data_utils._RE
+        else:
+          action = data_utils._LA
+
+        if (self.relation_model is not None
+            and (action == data_utils._LA or action == data_utils._RA
+                 or buffer_index == sent_length)):
           relation_logit = self.relation_model(features)      
           relation_logit_np = relation_logit.type(torch.FloatTensor).data.numpy()
           label = int(relation_logit_np.argmax(axis=1)[0])
         
       transition_logits.append(transition_logit)
+      actions.append(pred_action) 
       if self.relation_model is not None:
         relation_logits.append(relation_logit)
         labels.append(label)
 
       # excecute action
-      if action == data_utils._ESH or action == data_utils._ERA:
+      if action == data_utils._SH or action == data_utils._RA:
         child = buf.roots[0]
-        if action == data_utils._ERA:
+        if action == data_utils._RA:
           # this duplication might cause a problem
           #stack.roots[-1].children.append(child) 
           stack_has_parent.append(True)
-          full_action = data_utils._RA
         else:
           stack_has_parent.append(False)
-          full_action = data_utils._SH
         stack_parent_relation.append(label)
 
         stack.roots.append(child)
@@ -150,19 +160,16 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
         has_right_arc = stack_has_parent.pop()
         stack_label = stack_parent_relation.pop()
         if has_right_arc or buffer_index == sent_length: # reduce
-          full_action = data_utils._RE
           stack.roots[-1].children.append(child) 
           conll[child.id].pred_parent_id = stack.roots[-1].id
           if self.relation_model is not None:
             conll[child.id].pred_relation_ind = stack_label
         else: # left-arc
-          full_action = data_utils._LA
           buf.roots[0].children.append(child) 
           conll[child.id].pred_parent_id = buf.roots[0].id
           if self.relation_model is not None:
             conll[child.id].pred_relation_ind = label
-      actions.append(full_action) 
-      print(actions)
+    #print(actions)
     return conll, transition_logits, None, actions, relation_logits, labels
    
 
