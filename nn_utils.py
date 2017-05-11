@@ -60,7 +60,7 @@ def select_features(input_features, indexes, use_cuda=False):
 
 def batch_feature_selection(input_features, seq_length, use_cuda=False,
     rev=False):
-  indexes = []
+  indexes = [] 
   if rev:
     for j in range(1, seq_length):
       for i in range(j):
@@ -75,6 +75,8 @@ def batch_feature_selection(input_features, seq_length, use_cuda=False,
   else:
     positions = Variable(torch.LongTensor(indexes))
 
+  #TODO I now want to select same positions, but for whole batch, and have
+  # extract (first) batch dimension as output
   selected_features = torch.index_select(input_features, 0, positions)
   return selected_features.view(-1, 2, input_features.size(2))
 
@@ -117,11 +119,25 @@ def filter_logits(logits, targets, float_var=False, use_cuda=False):
     return None, None
 
 
-def get_sentence_batch(source, use_cuda, evaluation=False):
+def get_sentence_data_batch(source_list, use_cuda, evaluation=False):
+  data_ts = torch.cat([source.word_tensor for source in source_list], 1)
   if use_cuda:
-    data = Variable(source.word_tensor, volatile=evaluation).cuda()
+    data = Variable(data_ts, volatile=evaluation).cuda()
   else:
-    data = Variable(source.word_tensor, volatile=evaluation)
+    data = Variable(data_ts, volatile=evaluation)
   return data
+
+
+def get_sentence_batch(source_list, use_cuda, evaluation=False):
+  data_ts = torch.cat([source.word_tensor[:-1] for source in source_list], 1)
+  target_ts = torch.cat([source.word_tensor[1:] for source in source_list], 1)
+  if use_cuda:
+    data = Variable(data_ts, volatile=evaluation).cuda()
+    target = Variable(target_ts.view(-1)).cuda()
+  else:
+    data = Variable(data_ts, volatile=evaluation)
+    target = Variable(target_ts.view(-1))
+  return data, target
+
 
 

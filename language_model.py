@@ -23,17 +23,6 @@ import rnn_lm
 import data_utils
 import nn_utils
 
-def get_sentence_batch(source_list, use_cuda, evaluation=False):
-  data_ts = torch.cat([source.word_tensor[:-1] for source in source_list], 1)
-  target_ts = torch.cat([source.word_tensor[1:] for source in source_list], 1)
-  if use_cuda:
-    data = Variable(data_ts, volatile=evaluation).cuda()
-    target = Variable(target_ts.view(-1)).cuda()
-  else:
-    data = Variable(data_ts, volatile=evaluation)
-    target = Variable(target_ts.view(-1))
-  return data, target
-
 if __name__=='__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument('--data_dir', required=True,
@@ -73,7 +62,7 @@ if __name__=='__main__':
                       help='gradient clipping')
   parser.add_argument('--num_init_lr_epochs', type=int, default=-1, 
                       help='number of epochs before learning rate decay')
-  parser.add_argument('--patience', type=int, default=3, 
+  parser.add_argument('--patience', type=int, default=10, 
                       help='Stop training if not improving for some number of epochs')
   parser.add_argument('--lr_decay', type=float, default=1.1,
                       help='learning rate decay per epoch')
@@ -183,6 +172,7 @@ if __name__=='__main__':
       random.shuffle(sentences)
       sentences.sort(key=len) 
       model.train()
+
       total_loss = 0
       total_num_tokens = 0
       global_loss = 0
@@ -199,7 +189,7 @@ if __name__=='__main__':
                and (j - i) < batch_size):
           j += 1
         # dimensions [length x batch]
-        data, targets = get_sentence_batch(
+        data, targets = nn_utils.get_sentence_batch(
             [sentences[k] for k in range(i, j)], args.cuda)
         local_batch_size = j - i
         i = j
@@ -233,11 +223,11 @@ if __name__=='__main__':
           total_num_tokens = 0
           start_time = time.time()
         
-        avg_global_loss = global_loss[0] / global_num_tokens
+      avg_global_loss = global_loss[0] / global_num_tokens
       print('-' * 89)
-      print('| end of epoch {:3d} | {:5d} batches | tokens {:5d} | loss {:5.2f} | ppl {:8.2f}'.format(
-              epoch, batch_count, global_num_tokens,
-              avg_global_loss, math.exp(avg_global_loss)))
+      print('| end of epoch {:3d} | time: {:5.2f}s | {:5d} batches | tokens {:5d} | loss {:5.2f} | ppl {:8.2f}'.format(
+          epoch, (time.time() - epoch_start_time), batch_count, global_num_tokens,
+          avg_global_loss, math.exp(avg_global_loss)))
 
       # Evaluate
       val_batch_size = 1
@@ -251,7 +241,7 @@ if __name__=='__main__':
 
       for val_sent in dev_sentences:
         hidden_state = model.init_hidden(val_batch_size)
-        data, targets = get_sentence_batch([val_sent], args.cuda, evaluation=True)
+        data, targets = nn_utils.get_sentence_batch([val_sent], args.cuda, evaluation=True)
         output, hidden_state = model(data, hidden_state)
         output_flat = output.view(-1, vocab_size)
         total_loss += criterion(output_flat, targets).data
@@ -283,7 +273,7 @@ if __name__=='__main__':
       if (not args.adam and args.num_init_lr_epochs > 0 
           and epoch >= args.num_init_lr_epochs):
         if args.reduce_lr and val_loss > prev_val_loss:
-          lr /= 4
+          lr /= 2
         else:
           lr = lr / args.lr_decay
         for param_group in optimizer.param_groups:

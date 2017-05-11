@@ -408,10 +408,11 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path,
   conll_sentences = []
   with open(conll_path + conll_name + '.conll', 'r') as conllFP:
     for sentence in read_conll(conllFP, projectify, replicate_rnng):
-      conll_sentences.append(sentence)
-      wordsCount.update([node.form for node in sentence])
-      posCount.update([node.pos for node in sentence])
-      relCount.update([node.relation for node in sentence])
+      if max_length <= 0 or len(sentence) <= max_length:
+        conll_sentences.append(sentence)
+        wordsCount.update([node.form for node in sentence])
+        posCount.update([node.pos for node in sentence])
+        relCount.update([node.relation for node in sentence])
 
   # For words, replace singletons with Berkeley UNK classes
   singletons = set(filter(lambda w: wordsCount[w] == 1, wordsCount.keys()))
@@ -439,8 +440,7 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path,
     for j, node in enumerate(sent): 
       sent[j].relation_id = rel_vocab.get_id(node.relation) 
       sent[j].word_id = word_vocab.get_id(node.norm) 
-    if max_length <= 0 or len(sent) <= max_length:
-      parse_sentences.append(ParseSentence.from_vocab_conll(sent, word_vocab))
+    parse_sentences.append(ParseSentence.from_vocab_conll(sent, word_vocab))
 
   write_text(working_path + conll_name + '.txt', parse_sentences)
 
@@ -460,13 +460,13 @@ def read_sentences_given_vocab(conll_path, conll_name, working_path,
   sentences = []
   with open(conll_path + conll_name + '.conll', 'r') as conllFP:
     for sentence in read_conll(conllFP, projectify, replicate_rnng):
-      for j, node in enumerate(sentence):
-        if node.form not in form_vocab: 
-          sentence[j].norm = map_unk_class(node.form, j==1, form_vocab,
-                                           replicate_rnng)
-        sentence[j].relation_id = rel_vocab.get_id(node.relation) 
-        sentence[j].word_id = word_vocab.get_id(node.norm) 
       if max_length <= 0 or len(sentence) <= max_length:
+        for j, node in enumerate(sentence):
+          if node.form not in form_vocab: 
+            sentence[j].norm = map_unk_class(node.form, j==1, form_vocab,
+                                             replicate_rnng)
+          sentence[j].relation_id = rel_vocab.get_id(node.relation) 
+          sentence[j].word_id = word_vocab.get_id(sentence[j].norm)
         sentences.append(ParseSentence.from_vocab_conll(sentence, word_vocab))
 
   txt_filename = working_path + conll_name + '.txt'

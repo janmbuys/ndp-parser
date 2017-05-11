@@ -42,7 +42,7 @@ def training_decode(args, tr_system, dev_sentences, num_relations, epoch):
 
   print('Decoding dev sentences')
   for val_sent in dev_sentences:
-    sentence_data = nn_utils.get_sentence_batch(val_sent, args.cuda, evaluation=True)
+    sentence_data = nn_utils.get_sentence_data_batch([val_sent], args.cuda, evaluation=True)
     encoder_state = tr_system.encoder_model.init_hidden(val_batch_size)
     encoder_output = tr_system.encoder_model(sentence_data, encoder_state)
 
@@ -159,7 +159,7 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
       # Training loop
 
       # sentence encoder
-      sentence_data = nn_utils.get_sentence_batch(train_sent, args.cuda)
+      sentence_data = nn_utils.get_sentence_data_batch([train_sent], args.cuda)
       tr_system.encoder_model.zero_grad()
       tr_system.transition_model.zero_grad()
       if args.predict_relations:
@@ -367,7 +367,7 @@ def score(args, dev_sentences, test_sentences, word_vocab, pos_vocab,
 
   for val_sent in dev_sentences:
     sentence_loss = 0
-    sentence_data = nn_utils.get_sentence_batch(val_sent, args.cuda, evaluation=True)
+    sentence_data = nn_utils.get_sentence_data_batch([val_sent], args.cuda, evaluation=True)
     encoder_state = encoder_model.init_hidden(val_batch_size)
     encoder_output = encoder_model(sentence_data, encoder_state)
     total_length += len(val_sent) - 1 
@@ -450,7 +450,7 @@ def decode(args, dev_sentences, test_sentences, word_vocab, pos_vocab,
 
   for val_sent in dev_sentences:
     sentence_loss = 0
-    sentence_data = nn_utils.get_sentence_batch(val_sent, args.cuda, evaluation=True)
+    sentence_data = nn_utils.get_sentence_data_batch([val_sent], args.cuda, evaluation=True)
     encoder_state = encoder_model.init_hidden(val_batch_size)
     encoder_output = encoder_model(sentence_data, encoder_state)
     total_length += len(val_sent) - 1 

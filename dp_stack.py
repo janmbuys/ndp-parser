@@ -355,7 +355,7 @@ class DPStack(nn.Module):
   
 
   def neg_log_likelihood(self, sentence):
-    encoder_state = self.encoder_model.init_hidden(1) # batch_size==1
+    encoder_state = self.encoder_model.init_hidden(sentence.size()[1]) # batch_size
     encoder_features = self.encoder_model(sentence, encoder_state)
     word_ids = [int(x) for x in sentence.view(-1).data]
 

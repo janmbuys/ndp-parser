@@ -8,7 +8,7 @@ class RNNEncoder(nn.Module):
   """Container module with an embedding layer and recurrent module."""
 
   def __init__(self, vocab_size, emb_size, hidden_size, num_layers,
-    dropout=0.0, bidirectional=False, use_cuda=False):
+    dropout=0.0, init_weight_range=0.1, bidirectional=False, use_cuda=False):
     super(RNNEncoder, self).__init__()
     self.hidden_size = hidden_size
     self.num_layers = num_layers
@@ -19,12 +19,10 @@ class RNNEncoder(nn.Module):
     self.embed = nn.Embedding(vocab_size, emb_size)
     self.rnn = nn.LSTM(emb_size, hidden_size, num_layers, dropout=dropout,
         bias=False, bidirectional=bidirectional) #TODO include extra bias or not?
-    self.init_weights()
+    self.init_weights(init_weight_range)
 
-  def init_weights(self):
-    initrange = 0.1
+  def init_weights(self, initrange=0.1):
     self.embed.weight.data.uniform_(-initrange, initrange)
-    #nn.init.xavier_uniform(self.embed.weight)
 
   def init_hidden(self, batch_size):
     weight = next(self.parameters()).data
