@@ -669,9 +669,9 @@ if __name__=='__main__':
   #data_utils.create_length_histogram(sentences, args.working_dir)
 
   if args.small_data:
-    sentences = sentences[:1000]
-    dev_sentences = dev_sentences
-    #dev_sentences = dev_sentences[:100]
+    sentences = sentences[:100]
+    #dev_sentences = dev_sentences
+    dev_sentences = dev_sentences[:100]
 
   if args.decode:          
     decode(args, dev_sentences, test_sentences, word_vocab, 

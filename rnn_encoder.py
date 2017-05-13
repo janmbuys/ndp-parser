@@ -39,6 +39,7 @@ class RNNEncoder(nn.Module):
     # hidden: tuple of (layers, batch_size, hidden_size)
     emb = self.drop(self.embed(inp))
     output, hidden = self.rnn(emb, hidden)
+    #print(str(self.hidden_size) + ' : ' + str(output.size()))
     output = self.drop(output)
     return output
 

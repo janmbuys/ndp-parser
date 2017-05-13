@@ -49,6 +49,12 @@ if __name__=='__main__':
                       default=False)
   parser.add_argument('--txt_data_fixed_vocab', action='store_true', 
                       default=False)
+  parser.add_argument('--score', action='store_true', 
+                      help='Only score, assuming existing model', 
+                      default=False)
+  parser.add_argument('--test', action='store_true', 
+                      help='Evaluate test set', 
+                      default=False)
 
   parser.add_argument('--embedding_size', type=int, default=128,
                       help='size of word embeddings')
@@ -145,6 +151,66 @@ if __name__=='__main__':
 
   #data_utils.create_length_histogram(sentences)
 
+  def score(val_sentences):
+    vocab_size = len(word_vocab)
+
+    working_path = args.working_dir + '/'
+    print('Loading model')
+    # Load model.
+    model_fn = working_path + args.save_model
+    with open(model_fn, 'rb') as f:
+      model = torch.load(f)
+    if args.cuda:
+      model.cuda()
+    print('Done loading model')
+
+    eval_start_time = time.time()
+    total_loss, total_length, total_length_more = evaluate(val_sentences, model)
+
+    val_loss = total_loss[0] / total_length
+    val_loss_more = total_loss[0] / total_length_more
+
+    print('| end of scoring | time: {:5.2f}s | {:5d} tokens | valid loss {:5.2f} | '
+              'valid ppl {:8.2f}'.format((time.time() - eval_start_time),
+                                         total_length, val_loss, math.exp(val_loss)))
+    print('                     | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(
+      val_loss_more, math.exp(val_loss_more)))
+ 
+
+  def evaluate(val_sentences, model):
+    val_batch_size = 1
+    total_loss = 0
+    total_loss_direct = 0
+    total_length = 0
+    total_length_more = 0
+    model.eval()
+    criterion = nn.CrossEntropyLoss(size_average=False)
+    log_normalize = nn.LogSoftmax()
+    calculate_direct = False
+    vocab_size = len(word_vocab)
+
+    for val_sent in val_sentences:
+      hidden_state = model.init_hidden(val_batch_size)
+      data, targets = nn_utils.get_sentence_batch([val_sent], args.cuda, evaluation=True)
+      output, hidden_state = model(data, hidden_state)
+      output_flat = output.view(-1, vocab_size)
+      total_loss += criterion(output_flat, targets).data
+      assert output_flat.size()[0] == len(val_sent)
+      # direct loss calculation
+      if calculate_direct:
+        word_ids = [int(x) for x in targets.view(-1).data]
+        word_dist_list = log_normalize(output_flat)
+        for i, word_id in enumerate(word_ids):
+          total_loss_direct -= nn_utils.to_numpy(word_dist_list[i, word_id])
+      total_length += len(val_sent) - 1 
+      total_length_more += len(val_sent) 
+
+    if calculate_direct:
+      val_loss_direct = total_loss_direct[0] / total_length
+      print('     | valid loss direct {:5.2f} | valid ppl {:8.2f}'.format(val_loss_direct, math.exp(val_loss_direct)))
+
+    return total_loss, total_length, total_length_more
+
   def train():
     lr = args.lr
     vocab_size = len(word_vocab)
@@ -230,44 +296,17 @@ if __name__=='__main__':
           avg_global_loss, math.exp(avg_global_loss)))
 
       # Evaluate
-      val_batch_size = 1
-      total_loss = 0
-      total_loss_direct = 0
-      total_length = 0
-      total_length_more = 0
-      model.eval()
-      log_normalize = nn.LogSoftmax()
-      calculate_direct = False
-
-      for val_sent in dev_sentences:
-        hidden_state = model.init_hidden(val_batch_size)
-        data, targets = nn_utils.get_sentence_batch([val_sent], args.cuda, evaluation=True)
-        output, hidden_state = model(data, hidden_state)
-        output_flat = output.view(-1, vocab_size)
-        total_loss += criterion(output_flat, targets).data
-        assert output_flat.size()[0] == len(val_sent)
-        # direct loss calculation
-        if calculate_direct:
-          word_ids = [int(x) for x in targets.view(-1).data]
-          word_dist_list = log_normalize(output_flat)
-          for i, word_id in enumerate(word_ids):
-            total_loss_direct -= nn_utils.to_numpy(word_dist_list[i, word_id])
-        total_length += len(val_sent) - 1 
-        total_length_more += len(val_sent) 
+      total_loss, total_length, total_length_more = evaluate(dev_sentences, model)
 
       val_loss = total_loss[0] / total_length
       val_loss_more = total_loss[0] / total_length_more
-      if calculate_direct:
-        val_loss_direct = total_loss_direct[0] / total_length
 
       print('| end of epoch {:3d} | time: {:5.2f}s | {:5d} tokens | valid loss {:5.2f} | '
               'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
                                          total_length, val_loss, math.exp(val_loss)))
       print('                     | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(val_loss_more,
           math.exp(val_loss_more)))
-      if calculate_direct:
-        print('                   | valid loss direct {:5.2f} | valid ppl {:8.2f}'.format(val_loss_direct, math.exp(val_loss_direct)))
-
+       
       print('-' * 89)
       # Anneal the learning rate.
       if (not args.adam and args.num_init_lr_epochs > 0 
@@ -290,5 +329,11 @@ if __name__=='__main__':
             torch.save(model, f)
       if args.patience > 0 and patience_count >= args.patience:
         break
+  if args.score:
+    if args.test:
+      score(test_sentences)    
+    else:
+      score(dev_sentences)    
+  else:
+    train()
 
-  train()

@@ -34,7 +34,7 @@ class TransitionSystem():
     self.num_transitions = num_transitions
     self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, 
         embedding_size, hidden_size, num_layers, dropout,
-        bidirectional, use_cuda)
+        bidirectional=bidirectional, use_cuda=use_cuda)
       
     feature_size = (hidden_size*2 if bidirectional else hidden_size)
     if decompose_actions:

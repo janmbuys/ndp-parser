@@ -37,17 +37,25 @@ def to_numpy(dist):
   return dist.type(torch.FloatTensor).data.numpy()
 
 # code: http://pytorch.org/tutorials/beginner/deep_learning_nlp_tutorial.html#advanced-making-dynamic-decisions-and-the-bi-lstm-crf
-def log_sum_exp(vec):
+def log_sum_exp_1d(vec):
     max_score = vec[0, np.argmax(vec)]
     max_score_broadcast = max_score.view(1, -1).expand(1, vec.size()[1])
     return max_score + torch.log(torch.sum(torch.exp(vec - max_score_broadcast)))
 
 def log_sum_exp_2d(vec):
+    # sum over second dimension
     max_score, _ = torch.max(vec, 1) 
     #max_score = vec[0, np.argmax(vec, 1)]
     max_score_broadcast = max_score.view(-1, 1).expand(vec.size())
     return max_score + torch.log(torch.sum(
         torch.exp(vec - max_score_broadcast), 1))
+
+def log_sum_exp(vec, dim):
+    # sum over dim
+    max_score, _ = torch.max(vec, dim) 
+    max_score_broadcast = max_score.expand(vec.size())
+    return max_score + torch.log(torch.sum(
+        torch.exp(vec - max_score_broadcast), dim))
 
 def select_features(input_features, indexes, use_cuda=False):
   if use_cuda:
@@ -57,6 +65,36 @@ def select_features(input_features, indexes, use_cuda=False):
   
   return torch.index_select(input_features, 0, positions)
 
+def new_batch_feature_selection(input_features, seq_length, use_cuda=False,
+    rev=False):
+  left_indexes = [] 
+  right_indexes = [] 
+  if rev:
+    for j in range(1, seq_length):
+      for i in range(j):
+        left_indexes.append(i)
+        right_indexes.append(j)
+  else:
+    for i in range(seq_length-1):
+      for j in range(i+1, seq_length):
+        left_indexes.append(i)
+        right_indexes.append(j)
+
+  if use_cuda:
+    left_positions = Variable(torch.LongTensor(left_indexes)).cuda()
+    right_positions = Variable(torch.LongTensor(right_indexes)).cuda()
+  else:
+    left_positions = Variable(torch.LongTensor(left_indexes))
+    right_positions = Variable(torch.LongTensor(right_indexes))
+
+  left_selected_features = torch.index_select(input_features, 0,
+      left_positions).view(-1, input_features.size(1), 1, input_features.size(2))
+  #print(left_selected_features)
+  right_selected_features = torch.index_select(input_features, 0, 
+      right_positions).view(-1, input_features.size(1), 1, input_features.size(2))
+  #print(right_selected_features)
+
+  return torch.cat((left_selected_features, right_selected_features), 2)
 
 def batch_feature_selection(input_features, seq_length, use_cuda=False,
     rev=False):
@@ -75,10 +113,8 @@ def batch_feature_selection(input_features, seq_length, use_cuda=False,
   else:
     positions = Variable(torch.LongTensor(indexes))
 
-  #TODO I now want to select same positions, but for whole batch, and have
-  # extract (first) batch dimension as output
   selected_features = torch.index_select(input_features, 0, positions)
-  return selected_features.view(-1, 2, input_features.size(2))
+  return selected_features.view(-1, 2, input_features.size(1), input_features.size(2))
 
 
 def extract_feature_positions(b, s0, s1=None, s2=None, more_context=False):

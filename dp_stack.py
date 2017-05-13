@@ -20,7 +20,7 @@ class DPStack(nn.Module):
     super(DPStack, self).__init__()
     self.use_cuda = use_cuda
     self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, embedding_size, 
-        hidden_size, num_layers, dropout, False, use_cuda)
+        hidden_size, num_layers, dropout, bidirectional=False, use_cuda=use_cuda)
 
     feature_size = hidden_size
     self.transition_model = binary_classifier.BinaryClassifier(num_features, 
@@ -76,7 +76,7 @@ class DPStack(nn.Module):
             #score = score + t_score if score is not None else t_score
             block_scores.append(t_score)
           #table[l][i][j] = score
-          table[l][i][j] = nn_utils.log_sum_exp(torch.cat(block_scores).view(1, -1))
+          table[l][i][j] = nn_utils.log_sum_exp_1d(torch.cat(block_scores).view(1, -1))
     return table[0][0][sent_length]
 
   def _inside_algorithm_iterative(self, encoder_features, word_ids):
@@ -127,30 +127,37 @@ class DPStack(nn.Module):
             #score = score + t_score if score is not None else t_score
             block_scores.append(t_score)
           #table[l][i][j] = score
-          table[l, i, j] = nn_utils.log_sum_exp(torch.cat(block_scores).view(1, -1))
+          table[l, i, j] = nn_utils.log_sum_exp_1d(torch.cat(block_scores).view(1, -1))
     return table[0, 0, sent_length]
 
-  def _inside_algorithm_iterative_vectorized(self, encoder_features, word_ids):
-    sent_length = len(word_ids) - 1
-    seq_length = len(word_ids)
+  def _inside_algorithm_iterative_vectorized(self, encoder_features, sentence,
+      batch_size):
+    # enc feature dim length x batch x state_size
+    # sentence dim length x batch
+    sent_length = sentence.size()[0] - 1
+    seq_length = sentence.size()[0]
 
-    features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+    #print(encoder_features)
+    # dim [num_pairs, batch_size, 2, state_size]
+    features = nn_utils.new_batch_feature_selection(encoder_features, seq_length,
         self.use_cuda)
-    features_rev = nn_utils.batch_feature_selection(encoder_features, seq_length,
-        self.use_cuda, rev=True)
+    #print(features)
+    num_pairs = features.size()[0]
 
-    re_probs_list = self.binary_normalize(self.transition_model(features)).view(-1)
-    re_probs_list_rev = self.binary_normalize(self.transition_model(features_rev)).view(-1)
-
-    word_distr_list = self.log_normalize(self.word_model(features))
+    # dim [num_pairs*batch_size, output_size] -> break dim
+    re_probs_list = self.binary_normalize(self.transition_model(features)).view(num_pairs, batch_size)
+    word_distr_list = self.log_normalize(self.word_model(features)).view(num_pairs, batch_size, -1) 
+    #print(re_probs_list)
 
     init_features = nn_utils.select_features(encoder_features, [0, 0], 
                                              self.use_cuda)
-    init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
+    # dim [batch_size x vocab_size]
+    init_word_distr = self.log_normalize(self.word_model(init_features))
     # do simple arithmetic to access distribution list entries
     def get_feature_index(i, j):
       return int((2*seq_length-i-1)*(i/2) + j-i-1)
 
+    # rather enumerate indexes for the reverse
     rev_inds_table = np.zeros((seq_length, seq_length), dtype=np.int)
     counter = 0
     for j in range(1, seq_length):
@@ -161,20 +168,20 @@ class DPStack(nn.Module):
     def get_rev_feature_index(i, j):
       return rev_inds_table[i, j]
 
-    table_size = len(word_ids)
-    table_ts = torch.FloatTensor(table_size, table_size, table_size).fill_(-np.inf)
+    table_size = sentence.size()[0]
+    table_ts = torch.FloatTensor(table_size, table_size, table_size, batch_size).fill_(-np.inf)
     if self.use_cuda:
       table = Variable(table_ts).cuda()
     else:
       table = Variable(table_ts)
 
     # word probs
-    table[0, 0, 1] = init_word_distr[word_ids[1]]
+    table[0, 0, 1] = torch.gather(init_word_distr, 1, sentence[1].view(-1, 1))
     for i in range(sent_length-1): # features goes 1 index further
       start_index = get_feature_index(i, i+1)
       end_index = get_feature_index(i, sent_length-1) # last j+1
 
-      word_probs_ts = torch.FloatTensor(sent_length - (i + 1)).fill_(-np.inf)
+      word_probs_ts = torch.FloatTensor(sent_length - (i + 1), batch_size).fill_(-np.inf)
       if self.use_cuda:
         word_probs = Variable(word_probs_ts).cuda()
       else:
@@ -183,11 +190,33 @@ class DPStack(nn.Module):
       # word_distr_list[start_index:end_index, *]
       for j in range(i+1, sent_length): # features goes 1 index further
         index = get_feature_index(i, j)
-        word_probs[j - (i + 1)] = word_distr_list[index, word_ids[j+1]]
+        word_probs[j - (i + 1)] = torch.gather(word_distr_list[index], 1,
+            sentence[j+1].view(-1, 1))
       re_probs = torch.log1p(-re_probs_list[start_index:end_index+1])
 
+      range_ts = torch.LongTensor(range(1, sent_length-i)).repeat(1, batch_size)
+      if self.use_cuda:
+        range_var = Variable(range_ts).cuda()
+      else:
+        range_var = Variable(range_ts)
+       
+      #TODO need to check what is table's shared underlying storage
+      word_table_ts = torch.FloatTensor(sent_length - (i+1), sent_length - i,
+          batch_size).fill_(-np.inf) 
+      if self.use_cuda:
+        word_table = Variable(word_table_ts).cuda()
+      else:
+        word_table = Variable(word_table_ts)
+
+      temp = re_probs + word_probs
+      word_table.scatter_(1, range_var.view(-1, 1, batch_size), 
+          temp.view(-1, 1, batch_size))  #TODO diagonal over wrong dimension!
+      #print(word_table)
+
+      table[i, i+1:sent_length, i+1:sent_length+1] = word_table
+
       # Note that the diagonal contains 0's.
-      table[i, i+1:table_size, i+1:table_size] = torch.diag(re_probs + word_probs, 1)
+      #table[i, i+1:table_size, i+1:table_size] = torch.diag(re_probs + word_probs, 1)
       
       #for j in range(i+1, sent_length): # features goes 1 index further
       #  index = get_feature_index(i, j)
@@ -199,20 +228,20 @@ class DPStack(nn.Module):
         j = i + gap
         start_ind = get_rev_feature_index(i+1, j)
         end_ind = get_rev_feature_index(j-1, j) + 1
-        re_temp = torch.log(re_probs_list[start_ind:end_ind].view(1, -1))
+        re_temp = torch.log(re_probs_list[start_ind:end_ind].view(1, -1, batch_size))
       
         # This vectorization actually gives an order of magnitude speedup!
         all_block_scores = (table[0:max(i, 1), i, i+1:j]
-                            + table[i, i+1:j, j].expand(max(i, 1), j-i-1)
-                            + re_temp.expand(max(i, 1), j-i-1))
-        table[0:max(i, 1), i, j] = nn_utils.log_sum_exp_2d(all_block_scores)
+                            + table[i, i+1:j, j].expand(max(i, 1), j-i-1, batch_size)
+                            + re_temp.expand(max(i, 1), j-i-1, batch_size))
+        #print(all_block_scores) #TODO table entries accessed contains infs
+        table[0:max(i, 1), i, j] = nn_utils.log_sum_exp(all_block_scores, 1)
           
         #for l in range(max(i, 1)):
         #  block_scores = table[l, i, i+1:j] + temp 
-        #  table[l, i, j] = nn_utils.log_sum_exp(block_scores.view(1, -1))
+        #  table[l, i, j] = nn_utils.log_sum_exp_1d(block_scores.view(1, -1))
 
     return table[0, 0, sent_length]
-
 
 
   def _inside_algorithm_recusive(self,encoder_features, word_ids): 
@@ -245,7 +274,7 @@ class DPStack(nn.Module):
           score = (inside_op(l, i, k) + inside_op(i, k, j) +   
                    torch.log(re_probs_list[get_feature_index(k, j), 0]))
           block_scores.append(score) #TODO rather add one at a time
-        return nn_utils.log_sum_exp(torch.cat(block_scores).view(1, -1))
+        return nn_utils.log_sum_exp_1d(torch.cat(block_scores).view(1, -1))
 
     return inside_op(0, 0, sent_length)
 
@@ -292,55 +321,64 @@ class DPStack(nn.Module):
 
 
   def _viterbi_algorithm(self, encoder_features, word_ids):
+    #TODO test TODO don't do batch decoding, but need to handle datastructures
     sent_length = len(word_ids) - 1
     seq_length = len(word_ids)
+
+    # compute all sh/re and word probabilities
+    seq_length = sent_length + 1
+    reduce_probs = np.zeros([seq_length, seq_length])
+    word_log_probs = np.empty([sent_length, sent_length])
+    word_log_probs.fill(-np.inf)
 
     features = nn_utils.batch_feature_selection(encoder_features, seq_length,
         self.use_cuda)
     re_probs_list = self.binary_normalize(self.transition_model(features)).view(-1)
     word_distr_list = self.log_normalize(self.word_model(features))
 
+    counter = 0 
+    for i in range(seq_length-1):
+      for j in range(i+1, seq_length):
+        reduce_probs[i, j] = re_probs_list[counter, 0]
+        ra_probs[i, j] = ra_probs_list[counter, 0]
+        if self.word_model is not None and j < sent_length:
+          if j < sent_length - 1:
+            word_id = conll[j+1].word_id 
+          else:
+            word_id = data_utils._EOS
+          word_log_probs[i, j] = nn_utils.to_numpy(word_distr_list[counter, word_ids[j+1]])
+        counter += 1
 
     init_features = nn_utils.select_features(encoder_features, [0, 0], 
                                              self.use_cuda)
     init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
-    # do simple arithmetic to access distribution list entries
-    def get_feature_index(i, j):
-      return int((2*seq_length-i-1)*(i/2) + j-i-1)
-
-    table_size = len(word_ids)
-    table_ts = torch.FloatTensor(table_size, table_size, table_size).fill_(-np.inf)
-    if self.use_cuda:
-      table = Variable(table_ts).cuda()
-    else:
-      table = Variable(table_ts)
-    split_indexes = np.zeros((table_size, table_size, table_size), dtype=np.int)
-    # word probs
-    table[0, 0, 1] = init_word_distr[word_ids[1]]
-    for i in range(sent_length-1): # features goes 1 index further
-      for j in range(i+1, sent_length): # features goes 1 index further
-        index = get_feature_index(i, j)
-        table[i, j, j+1] = (torch.log1p(-re_probs_list[index]) 
-                            + word_distr_list[index, word_ids[j+1]])
  
-    for gap in range(2, sent_length+1):
-      #print(gap)
-      for i in range(sent_length+1-gap):
-        j = i + gap
-        for l in range(max(i, 1)):
-          block_scores = []
-          score = None
+    table_size = len(word_ids)
+    table = np.empty([table_size, table_size, table_size])
+    table.fill(-np.inf) # log probabilities
+    split_indexes = np.zeros((table_size, table_size, table_size), dtype=np.int)
+
+    # first word prob 
+    table[0, 0, 1] = init_word_distr[word_ids[1]]
+
+    for j in range(2, sent_length+1):
+      for i in range(j-1):
+        score = np.log(1 - reduce_probs[i, j-1]) 
+        if self.word_model is not None:
+          score += word_log_probs[i, j-1]
+        table[i, j-1, j] = score
+      for i in range(j-2, -1, -1):
+        for l in range(max(i, 1)): # l=0 if i=0
+          block_scores = [] # adjust indexes after collecting scores
+          block_directions = []
           for k in range(i+1, j):
-            re_score = torch.log(re_probs_list[get_feature_index(k, j)])
-            t_score = table[l, i, k] + table[i, k, j] + re_score
-            #score = score + t_score if score is not None else t_score
-            block_scores.append(t_score)
-          #table[l][i][j] = score
+            score = table[l, i, k] + table[i, k, j] + np.log(reduce_probs[k, j])
+            block_scores.append(score)
           ind = np.argmax(block_scores)
           k = ind + i + 1
           table[l, i, j] = block_scores[ind]
           split_indexes[l, i, j] = k
- 
+
     def backtrack_path(l, i, j):
       """ Find action sequence for best path. """
       if i == j - 1:
@@ -355,13 +393,13 @@ class DPStack(nn.Module):
   
 
   def neg_log_likelihood(self, sentence):
-    encoder_state = self.encoder_model.init_hidden(sentence.size()[1]) # batch_size
+    batch_size = sentence.size()[1]
+    encoder_state = self.encoder_model.init_hidden(batch_size)
     encoder_features = self.encoder_model(sentence, encoder_state)
-    word_ids = [int(x) for x in sentence.view(-1).data]
 
-    #return -self._inside_algorithm_iterative(encoder_features, word_ids)
-    return -self._inside_algorithm_iterative_vectorized(encoder_features, word_ids)
-
+    loss = -torch.sum(self._inside_algorithm_iterative_vectorized(
+        encoder_features, sentence, batch_size))
+    return loss
 
   def forward(self, sentence):
     encoder_state = self.encoder_model.init_hidden(1) # batch_size==1

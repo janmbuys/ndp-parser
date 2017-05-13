@@ -136,29 +136,30 @@ def train_unsup(args, sentences, dev_sentences, test_sentences, word_vocab):
          (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
     print('-' * 89)
 
-    stack_model.eval()
-    decode_start_time = time.time()
-    # Decode dev set 
-    #TODO ppl from best path
-    for val_sent in dev_sentences:
-      sentence_data = nn_utils.get_sentence_data_batch([val_sent], args.cuda,
-          evaluation=True)
-      transition_logits, actions, shift_dependents, reduce_dependents = stack_model.forward(sentence_data)
-      #action_str =  ' '.join(['SH' if act == 0 else 'RE' for act in actions])
-      #print(action_str)
-      #print('shift_dependents') 
-      #print(shift_dependents) 
-      #print('reduce_dependents') 
-      #print(reduce_dependents) 
-      #TODO print output, easiest is to define class in data_utils
+    if False: #TODO
+      stack_model.eval()
+      decode_start_time = time.time()
+      # Decode dev set 
+      #TODO ppl from best path
+      for val_sent in dev_sentences:
+        sentence_data = nn_utils.get_sentence_data_batch([val_sent], args.cuda,
+            evaluation=True)
+        transition_logits, actions, shift_dependents, reduce_dependents = stack_model.forward(sentence_data)
+        #action_str =  ' '.join(['SH' if act == 0 else 'RE' for act in actions])
+        #print(action_str)
+        #print('shift_dependents') 
+        #print(shift_dependents) 
+        #print('reduce_dependents') 
+        #print(reduce_dependents) 
+        #TODO print output, easiest is to define class in data_utils
 
-    val_loss = 0
-    print('| decode time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
-         (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
-    print('-' * 89)
+      val_loss = 0
+      print('| decode time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
+           (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
+      print('-' * 89)
 
     if args.save_model != '':
-      model_fn = working_path + args.save_model + '_stack.pt'
+      model_fn = args.working_dir + '/' + args.save_model + '_stack.pt'
       with open(model_fn, 'wb') as f:
         torch.save(stack_model, f)
 
