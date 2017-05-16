@@ -30,14 +30,15 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
   def __init__(self, vocab_size, num_relations, 
       embedding_size, hidden_size, num_layers, dropout, init_weight_range,
       bidirectional, more_context, predict_relations, generative, 
-      decompose_actions, batch_size, use_cuda):
+      decompose_actions, batch_size, use_cuda, model_path='', load_model=False):
     assert not (more_context and decompose_actions)
     num_transitions = 3
     num_features = 4 if more_context else 2
     super(ArcHybridTransitionSystem, self).__init__(vocab_size, num_relations,
         num_features, num_transitions, embedding_size, hidden_size, 
         num_layers, dropout, init_weight_range, bidirectional, 
-        predict_relations, generative, decompose_actions, batch_size, use_cuda)
+        predict_relations, generative, decompose_actions, batch_size, use_cuda,
+        model_path, load_model)
     self.more_context = more_context
     self.generate_actions = [data_utils._SH]
 
@@ -176,6 +177,7 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
     sent_length = len(conll) # includes root, but not EOS
     log_normalize = nn.LogSoftmax()
     binary_normalize = nn.Sigmoid()
+    eps = np.exp(-10) # used to avoid division by 0
 
     # compute all sh/re and word probabilities
     seq_length = sent_length + 1
@@ -222,7 +224,7 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
 
     for j in range(2, sent_length+1):
       for i in range(j-1):
-        score = np.log(1 - reduce_probs[i, j-1]) 
+        score = np.log(1 - reduce_probs[i, j-1] + eps) 
         if self.word_model is not None:
           score += word_log_probs[i, j-1]
         table[i, j-1, j] = score
@@ -231,7 +233,7 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
           block_scores = [] # adjust indexes after collecting scores
           block_directions = []
           for k in range(i+1, j):
-            score = table[l, i, k] + table[i, k, j] + np.log(reduce_probs[k, j])
+            score = table[l, i, k] + table[i, k, j] + np.log(reduce_probs[k, j] + eps)
             if self.direction_model is not None:
               ra_prob = ra_probs[k, j]
               if ra_prob > 0.5 or j == sent_length:
@@ -384,8 +386,9 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
     sent_length = len(conll) # includes root, but not EOS
     log_normalize = nn.LogSoftmax()
     binary_normalize = nn.Sigmoid()
+    eps = np.exp(-10) # used to avoid division by 0
 
-# compute all sh/re and word probabilities
+    # compute all sh/re and word probabilities
     seq_length = sent_length + 1
     reduce_probs = np.zeros([seq_length, seq_length])
     ra_probs = np.zeros([seq_length, seq_length])
@@ -424,7 +427,7 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
 
     for j in range(2, sent_length+1):
       for i in range(j-1):
-        score = np.log(1 - reduce_probs[i, j-1]) 
+        score = np.log(1 - reduce_probs[i, j-1] + eps) 
         if self.word_model is not None:
           score += word_log_probs[i, j-1]
         table[i, j-1, j] = score
@@ -433,7 +436,7 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
           score = -np.inf
           for k in range(i+1, j):
             item_score = (table[l, i, k] + table[i, k, j] 
-                          + np.log(reduce_probs[k, j]))
+                          + np.log(reduce_probs[k, j] + eps))
             score = np.logaddexp(score, item_score)
           table[l, i, j] = score
     return table[0, 0, sent_length]

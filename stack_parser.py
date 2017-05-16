@@ -26,6 +26,32 @@ import dp_stack
 import data_utils
 import nn_utils
 
+def train_decode(val_sentences, stack_model, word_vocab, output_fn, max_sents=-1, use_cuda=False):
+  stack_model.eval()
+  decode_start_time = time.time()
+  with open(output_fn, 'w') as fh:
+    for i, val_sent in enumerate(val_sentences):
+      if max_sents > 0 and i > max_sents:
+        break
+      sentence_data = nn_utils.get_sentence_data_batch([val_sent], use_cuda,
+          evaluation=True)
+      transition_logits, actions, shift_dependents, reduce_dependents = stack_model.forward(sentence_data)
+      action_str =  ' '.join(['SH' if act == data_utils._SH else 'RE' for act in actions])
+      fh.write('# ' + action_str + '\n')
+      for i, entry in enumerate(val_sent.conll):
+        if i > 0:
+          if entry.parent_id > entry.id:
+            pred_parent = reduce_dependents[i]
+          else:
+            pred_parent = shift_dependents[i]
+          fh.write('\t'.join([str(entry.id), entry.form, '_', 
+            str(shift_dependents[i]), str(reduce_dependents[i]),
+            '_', str(pred_parent), '_', '_', '_']) + '\n')
+      fh.write('\n')
+  print('decode time {:2.2f}s'.format(time.time() - decode_start_time))
+ 
+
+
 def train_unsup(args, sentences, dev_sentences, test_sentences, word_vocab):
   vocab_size = len(word_vocab)
   num_features = 2
@@ -99,6 +125,12 @@ def train_unsup(args, sentences, dev_sentences, test_sentences, word_vocab):
       global_num_tokens += batch_tokens
 
       if batch_count % args.logging_interval == 0 and i > 0:
+        if args.decode_at_checkpoints:
+          train_decode(dev_sentences, stack_model, word_vocab, (args.working_dir + '/'
+              + args.dev_name + '.' + str(epoch) + '.' + str(batch_count) 
+              + '.shre'), -1, args.cuda)  #TODO 100
+          stack_model.train()
+
         cur_loss = total_loss[0] / total_num_tokens
         elapsed = time.time() - start_time
         print('| epoch {:3d} | {:5d} batches | lr {:02.4f} | ms/batch {:5.2f} | '
@@ -109,7 +141,7 @@ def train_unsup(args, sentences, dev_sentences, test_sentences, word_vocab):
         total_loss = 0
         total_num_tokens = 0
         start_time = time.time()
-      
+
     avg_global_loss = global_loss[0] / global_num_tokens
     print('-' * 89)
     print('| end of epoch {:3d} | time: {:5.2f}s | {:5d} batches | tokens {:5d} | loss {:5.2f} | ppl {:8.2f}'.format(
@@ -136,7 +168,7 @@ def train_unsup(args, sentences, dev_sentences, test_sentences, word_vocab):
       total_length += len(val_sent) - 1 
       total_length_more += len(val_sent) 
 
-    val_loss = total_loss[0]  / total_length
+    val_loss = total_loss[0] / total_length
     val_loss_more = total_loss[0] / total_length_more
     print('-' * 89)
     print('| eval time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
@@ -146,28 +178,9 @@ def train_unsup(args, sentences, dev_sentences, test_sentences, word_vocab):
 
     print('-' * 89)
 
-    if False: #TODO
-      stack_model.eval()
-      decode_start_time = time.time()
-      # Decode dev set 
-      #TODO ppl from best path
-      for val_sent in dev_sentences:
-        sentence_data = nn_utils.get_sentence_data_batch([val_sent], args.cuda,
-            evaluation=True)
-        transition_logits, actions, shift_dependents, reduce_dependents = stack_model.forward(sentence_data)
-        #action_str =  ' '.join(['SH' if act == 0 else 'RE' for act in actions])
-        #print(action_str)
-        #print('shift_dependents') 
-        #print(shift_dependents) 
-        #print('reduce_dependents') 
-        #print(reduce_dependents) 
-        #TODO print output, easiest is to define class in data_utils
-
-      val_loss = 0
-      print('| decode time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
-           (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
-      print('-' * 89)
-
+    train_decode(dev_sentences, stack_model, word_vocab, args.working_dir + '/'
+        + args.dev_name + '.' + str(epoch) + '.shre', use_cuda=args.cuda)
+    
     # Anneal the learning rate.
     if (not args.adam and args.num_init_lr_epochs > 0 
         and epoch >= args.num_init_lr_epochs):

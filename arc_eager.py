@@ -30,7 +30,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
   def __init__(self, vocab_size, num_relations,
       embedding_size, hidden_size, num_layers, dropout, init_weight_range, 
       bidirectional, more_context, predict_relations, generative, 
-      decompose_actions, batch_size, use_cuda):
+      decompose_actions, batch_size, use_cuda, model_path='', load_model=False):
     assert not decompose_actions and not more_context
     num_transitions = 3
     num_features = 2
@@ -38,7 +38,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
         num_features, num_transitions, embedding_size, hidden_size, 
         num_layers, dropout, init_weight_range, bidirectional,
         predict_relations, generative, decompose_actions,
-        batch_size, use_cuda)
+        batch_size, use_cuda, model_path, load_model)
     self.more_context = False
     self.generate_actions = [data_utils._SH, data_utils._RA]
 

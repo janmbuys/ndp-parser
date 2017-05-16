@@ -29,37 +29,62 @@ class TransitionSystem():
   def __init__(self, vocab_size, num_relations, num_features, num_transitions,
       embedding_size, hidden_size, num_layers, dropout, init_weight_range, 
       bidirectional, predict_relations, generative, decompose_actions, 
-      batch_size, use_cuda):
+      batch_size, use_cuda, model_path='', load_model=False):
     self.use_cuda = use_cuda
     self.vocab_size = vocab_size
     self.num_features = num_features
     self.num_transitions = num_transitions
-    self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, 
-        embedding_size, hidden_size, num_layers, dropout, init_weight_range,
-        bidirectional=bidirectional, use_cuda=use_cuda)
-      
-    feature_size = (hidden_size*2 if bidirectional else hidden_size)
-    if decompose_actions:
-      self.transition_model = binary_classifier.BinaryClassifier(num_features, 
-        feature_size, hidden_size, use_cuda) 
-      self.direction_model = binary_classifier.BinaryClassifier(num_features, 
-        feature_size, hidden_size, use_cuda) 
-    else:
-      self.transition_model = classifier.Classifier(num_features, feature_size, 
-        hidden_size, num_transitions, use_cuda) 
-      self.direction_model = None
 
-    if predict_relations:
-      self.relation_model = classifier.Classifier(num_features, feature_size, 
-          hidden_size, num_relations, use_cuda)
-    else:
-      self.relation_model = None
-      
-    if generative:
-      self.word_model = classifier.Classifier(num_features, feature_size,
-              hidden_size, vocab_size, use_cuda)
-    else:
-      self.word_model = None
+    if load_model:
+      assert model_path != ''
+      print('Loading models')
+      model_fn = model_path + '_encoder.pt'
+      with open(model_fn, 'rb') as f:
+        self.encoder_model = torch.load(f)
+      model_fn = model_path + '_transition.pt'
+      with open(model_fn, 'rb') as f:
+        self.transition_model = torch.load(f)
+      if predict_relations:
+        model_fn = model_path + '_relation.pt'
+        with open(model_fn, 'rb') as f:
+          self.relation_model = torch.load(f)
+      if generative:
+        model_fn = model_path + '_word.pt'
+        with open(model_fn, 'rb') as f:
+          self.word_model = torch.load(f)
+      if decompose_actions:
+        model_fn = model_path + '_direction.pt'
+        with open(model_fn, 'rb') as f:
+          self.direction_model = torch.load(f)
+
+    else: 
+      feature_size = (hidden_size*2 if bidirectional else hidden_size)
+
+      self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, 
+          embedding_size, hidden_size, num_layers, dropout, init_weight_range,
+          bidirectional=bidirectional, use_cuda=use_cuda)
+        
+      if decompose_actions:
+        self.transition_model = binary_classifier.BinaryClassifier(num_features, 
+          feature_size, hidden_size, use_cuda) 
+        self.direction_model = binary_classifier.BinaryClassifier(num_features, 
+          feature_size, hidden_size, use_cuda) 
+      else:
+        self.transition_model = classifier.Classifier(num_features, feature_size, 
+          hidden_size, num_transitions, use_cuda) 
+        self.direction_model = None
+
+      if predict_relations:
+        self.relation_model = classifier.Classifier(num_features, feature_size, 
+            hidden_size, num_relations, use_cuda)
+      else:
+        self.relation_model = None
+        
+      if generative:
+        self.word_model = classifier.Classifier(num_features, feature_size,
+                hidden_size, vocab_size, use_cuda)
+      else:
+        self.word_model = None
 
     if use_cuda:
       self.encoder_model.cuda()

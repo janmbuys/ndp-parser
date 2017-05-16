@@ -146,8 +146,15 @@ class DPStack(nn.Module):
 
     # dim [num_pairs*batch_size, output_size] -> break dim
     re_probs_list = self.binary_normalize(self.transition_model(features)).view(num_pairs, batch_size)
+    eps_ts = torch.FloatTensor(num_pairs, batch_size).fill_(np.exp(-10))
+    if self.use_cuda:
+      eps = Variable(eps_ts).cuda()
+    else:
+      eps = Variable(eps_ts)
+    re_log_probs_list = torch.log(re_probs_list+eps)
+    sh_log_probs_list = torch.log1p(-re_probs_list+eps)
+
     word_distr_list = self.log_normalize(self.word_model(features)).view(num_pairs, batch_size, -1) 
-    #print(re_probs_list)
 
     init_features = nn_utils.select_features(encoder_features, [0, 0], 
                                              self.use_cuda)
@@ -177,30 +184,23 @@ class DPStack(nn.Module):
 
     # word probs
     table[0, 0, 1] = torch.gather(init_word_distr, 1, sentence[1].view(-1, 1))
-    for i in range(sent_length-1): # features goes 1 index further
+    for i in range(sent_length-1): 
       start_index = get_feature_index(i, i+1)
-      end_index = get_feature_index(i, sent_length-1) # last j+1
-
+      end_index = get_feature_index(i, sent_length-1) + 1
+      
       word_probs_ts = torch.FloatTensor(sent_length - (i + 1), batch_size).fill_(-np.inf)
       if self.use_cuda:
         word_probs = Variable(word_probs_ts).cuda()
       else:
         word_probs = Variable(word_probs_ts)
 
-      # word_distr_list[start_index:end_index, *]
-      for j in range(i+1, sent_length): # features goes 1 index further
+      for j in range(i+1, sent_length):
         index = get_feature_index(i, j)
         word_probs[j - (i + 1)] = torch.gather(word_distr_list[index], 1,
             sentence[j+1].view(-1, 1))
-      re_probs = torch.log1p(-re_probs_list[start_index:end_index+1])
+      sh_probs = sh_log_probs_list[start_index:end_index] + word_probs
 
-      range_ts = torch.LongTensor(range(1, sent_length-i)).repeat(1, batch_size)
-      if self.use_cuda:
-        range_var = Variable(range_ts).cuda()
-      else:
-        range_var = Variable(range_ts)
-       
-      #TODO need to check what is table's shared underlying storage
+      # Cannot do scatter asign to table directly
       word_table_ts = torch.FloatTensor(sent_length - (i+1), sent_length - i,
           batch_size).fill_(-np.inf) 
       if self.use_cuda:
@@ -208,39 +208,30 @@ class DPStack(nn.Module):
       else:
         word_table = Variable(word_table_ts)
 
-      temp = re_probs + word_probs
+      # Indexing for scatter asignment.
+      range_ts = torch.LongTensor(range(1, sent_length-i)).view(-1, 1).repeat(1, batch_size)
+      if self.use_cuda:
+        range_var = Variable(range_ts).cuda()
+      else:
+        range_var = Variable(range_ts)
+      
       word_table.scatter_(1, range_var.view(-1, 1, batch_size), 
-          temp.view(-1, 1, batch_size))  #TODO diagonal over wrong dimension!
-      #print(word_table)
-
+          sh_probs.view(-1, 1, batch_size))
       table[i, i+1:sent_length, i+1:sent_length+1] = word_table
 
-      # Note that the diagonal contains 0's.
-      #table[i, i+1:table_size, i+1:table_size] = torch.diag(re_probs + word_probs, 1)
-      
-      #for j in range(i+1, sent_length): # features goes 1 index further
-      #  index = get_feature_index(i, j)
-      #  table[i, j, j+1] = (torch.log1p(-re_probs_list[index]) 
-      #                      + word_distr_list[index, word_ids[j+1]])
- 
     for gap in range(2, sent_length+1):
       for i in range(sent_length+1-gap):
         j = i + gap
         start_ind = get_rev_feature_index(i+1, j)
         end_ind = get_rev_feature_index(j-1, j) + 1
-        re_temp = torch.log(re_probs_list[start_ind:end_ind].view(1, -1, batch_size))
-      
-        # This vectorization actually gives an order of magnitude speedup!
+              
+        # Super vectorization
         all_block_scores = (table[0:max(i, 1), i, i+1:j]
-                            + table[i, i+1:j, j].expand(max(i, 1), j-i-1, batch_size)
-                            + re_temp.expand(max(i, 1), j-i-1, batch_size))
-        #print(all_block_scores) #TODO table entries accessed contains infs
+            + table[i, i+1:j, j].expand(max(i, 1), gap - 1, batch_size)
+            + re_log_probs_list[start_ind:end_ind].view(
+                1, -1, batch_size).expand(max(i, 1), gap - 1, batch_size))
         table[0:max(i, 1), i, j] = nn_utils.log_sum_exp(all_block_scores, 1)
           
-        #for l in range(max(i, 1)):
-        #  block_scores = table[l, i, i+1:j] + temp 
-        #  table[l, i, j] = nn_utils.log_sum_exp_1d(block_scores.view(1, -1))
-
     return table[0, 0, sent_length]
 
 
@@ -321,9 +312,9 @@ class DPStack(nn.Module):
 
 
   def _viterbi_algorithm(self, encoder_features, word_ids):
-    #TODO test TODO don't do batch decoding, but need to handle datastructures
     sent_length = len(word_ids) - 1
     seq_length = len(word_ids)
+    eps = np.exp(-10) # used to avoid division by 0
 
     # compute all sh/re and word probabilities
     seq_length = sent_length + 1
@@ -333,37 +324,31 @@ class DPStack(nn.Module):
 
     features = nn_utils.batch_feature_selection(encoder_features, seq_length,
         self.use_cuda)
-    re_probs_list = self.binary_normalize(self.transition_model(features)).view(-1)
+    re_probs_list = nn_utils.to_numpy(self.binary_normalize(self.transition_model(features)))
     word_distr_list = self.log_normalize(self.word_model(features))
 
     counter = 0 
     for i in range(seq_length-1):
       for j in range(i+1, seq_length):
         reduce_probs[i, j] = re_probs_list[counter, 0]
-        ra_probs[i, j] = ra_probs_list[counter, 0]
         if self.word_model is not None and j < sent_length:
-          if j < sent_length - 1:
-            word_id = conll[j+1].word_id 
-          else:
-            word_id = data_utils._EOS
           word_log_probs[i, j] = nn_utils.to_numpy(word_distr_list[counter, word_ids[j+1]])
         counter += 1
 
-    init_features = nn_utils.select_features(encoder_features, [0, 0], 
-                                             self.use_cuda)
-    init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
- 
     table_size = len(word_ids)
     table = np.empty([table_size, table_size, table_size])
     table.fill(-np.inf) # log probabilities
     split_indexes = np.zeros((table_size, table_size, table_size), dtype=np.int)
 
     # first word prob 
-    table[0, 0, 1] = init_word_distr[word_ids[1]]
+    init_features = nn_utils.select_features(encoder_features, [0, 0], 
+                                             self.use_cuda)
+    init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
+    table[0, 0, 1] = nn_utils.to_numpy(init_word_distr[word_ids[1]])
 
     for j in range(2, sent_length+1):
       for i in range(j-1):
-        score = np.log(1 - reduce_probs[i, j-1]) 
+        score = np.log(1 - reduce_probs[i, j-1] + eps) 
         if self.word_model is not None:
           score += word_log_probs[i, j-1]
         table[i, j-1, j] = score
@@ -372,7 +357,7 @@ class DPStack(nn.Module):
           block_scores = [] # adjust indexes after collecting scores
           block_directions = []
           for k in range(i+1, j):
-            score = table[l, i, k] + table[i, k, j] + np.log(reduce_probs[k, j])
+            score = table[l, i, k] + table[i, k, j] + np.log(reduce_probs[k, j] + eps)
             block_scores.append(score)
           ind = np.argmax(block_scores)
           k = ind + i + 1

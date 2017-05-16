@@ -297,6 +297,8 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
         epoch, (time.time() - epoch_start_time), total_length, val_loss,
         math.exp(val_loss)))
     print('decoding time: {:5.2f}s'.format(time.time() - decode_start_time))
+    print('                     | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(
+        val_loss_more, math.exp(val_loss_more)))
     print('-' * 89)
 
     # Anneal the learning rate.
@@ -339,45 +341,28 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
       break
 
 #TODO update
-def score(args, dev_sentences, test_sentences, word_vocab, pos_vocab, 
-          rel_vocab):
+def score(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
   vocab_size = len(word_vocab)
   num_relations = len(rel_vocab)
-  num_transitions = 3
-  num_features = 4 if args.use_more_features else 2
-  batch_size = args.batch_size
+  batch_size = 1
+  model_path = args.working_dir + '/' + args.save_model
+  assert args.decompose_actions
 
-  working_path = args.working_dir + '/'
-  print('Loading models')
-  # Load models. TODO only load parameters
-  model_fn = working_path + args.save_model + '_encoder.pt'
-  with open(model_fn, 'rb') as f:
-    encoder_model = torch.load(f)
-  model_fn = working_path + args.save_model + '_transition.pt'
-  with open(model_fn, 'rb') as f:
-    transition_model = torch.load(f)
-  if args.predict_relations:
-    model_fn = working_path + args.save_model + '_relation.pt'
-    with open(model_fn, 'rb') as f:
-      relation_model = torch.load(f)
-  if args.generative:
-    model_fn = working_path + args.save_model + '_word.pt'
-    with open(model_fn, 'rb') as f:
-      word_model = torch.load(f)
-  if args.decompose_actions:
-    model_fn = working_path + args.save_model + '_direction.pt'
-    with open(model_fn, 'rb') as f:
-      direction_model = torch.load(f)
-
-  if args.cuda:
-    encoder_model.cuda()
-    transition_model.cuda()
-    if args.predict_relations:
-      relation_model.cuda()
-    if args.generative:
-      word_model.cuda()
-    if args.decompose_actions:
-      direction_model.cuda()
+  # Build the model
+  assert args.arc_hybrid or args.arc_eager
+  if args.arc_hybrid:
+    tr_system = arc_hybrid.ArcHybridTransitionSystem(vocab_size,
+        num_relations, args.embedding_size, 
+        args.hidden_size, args.num_layers, args.dropout,
+        args.init_weight_range, args.bidirectional, 
+        args.use_more_features, args.predict_relations, args.generative,
+        args.decompose_actions, args.batch_size, args.cuda, model_path, True)
+  elif args.arc_eager:
+    tr_system = arc_eager.ArcEagerTransitionSystem(vocab_size,
+        num_relations, args.embedding_size, args.hidden_size, args.num_layers,
+        args.dropout, args.init_weight_range, args.bidirectional, 
+        args.use_more_features, args.predict_relations, args.generative,
+        args.decompose_actions, args.batch_size, args.cuda, model_path, True)
 
   criterion = nn.CrossEntropyLoss(size_average=args.criterion_size_average)
   binary_criterion = nn.BCELoss(size_average=args.criterion_size_average)
@@ -388,38 +373,40 @@ def score(args, dev_sentences, test_sentences, word_vocab, pos_vocab,
   val_batch_size = 1
   total_loss = 0
   total_length = 0
+  total_length_more = 0
   conll_predicted = []
   dev_losses = []
   decode_start_time = time.time()
 
-  encoder_model.eval()
+  tr_system.encoder_model.eval()
   normalize = nn.Sigmoid() 
   if not args.generative:
     word_model = None
 
-  for val_sent in dev_sentences:
+  print('Scoring val sentences')
+  for val_sent in val_sentences:
     sentence_loss = 0
-    sentence_data = nn_utils.get_sentence_data_batch([val_sent], args.cuda, evaluation=True)
-    encoder_state = encoder_model.init_hidden(val_batch_size)
-    encoder_output = encoder_model(sentence_data, encoder_state)
-    total_length += len(val_sent) - 1 
 
-    if args.decompose_actions and args.inside_decode: 
-      inside_score = inside_score_decode(val_sent.conll, encoder_output,
-            transition_model, word_model, use_cuda=args.cuda)
-      #inside_score.backward()
-      #score = nn_utils.to_numpy(inside_score)[0]  
-      score = inside_score
-      print(score)
-      dev_losses.append(score)
-      total_loss += score
-    #else:
-      #TODO greedy score
+
+    sentence_data = nn_utils.get_sentence_data_batch([val_sent], args.cuda, evaluation=True)
+    encoder_state = tr_system.encoder_model.init_hidden(val_batch_size)
+    encoder_output = tr_system.encoder_model(sentence_data, encoder_state)
+    total_length += len(val_sent) - 1 
+    total_length_more += len(val_sent) 
+
+    score = tr_system.inside_score_decode(val_sent.conll, encoder_output)
+    #print(score)
+    dev_losses.append(score)
+    total_loss += score
 
   val_loss = - total_loss / total_length
+  val_loss_more = - total_loss / total_length_more
+
   print('-' * 89)
-  print('| decoding time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
+  print('| scoring time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
        (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
+  print('                     | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(
+       val_loss_more, math.exp(val_loss_more)))
   print('-' * 89)
 
 #TODO update
@@ -596,6 +583,9 @@ if __name__=='__main__':
   parser.add_argument('--test', action='store_true', 
                       help='Evaluate test set', 
                       default=False)
+  parser.add_argument('--decode_at_checkpoints', action='store_true', 
+                      help='Decode at training checkpoints', 
+                      default=False)
 
   parser.add_argument('--viterbi_decode', action='store_true',
                       help='Perform Viterbi decoding')
@@ -709,18 +699,19 @@ if __name__=='__main__':
   # Read dev and test files with given vocab
   dev_sentences, _, _, _ = data_utils.read_sentences_given_vocab(
         data_path, args.dev_name, data_working_path, projectify=False, 
-        replicate_rnng=args.replicate_rnng_data,
-        max_length=args.max_sentence_length)
+        replicate_rnng=args.replicate_rnng_data)
 
   test_sentences, _,  _, _ = data_utils.read_sentences_given_vocab(
         data_path, args.test_name, data_working_path, projectify=False, 
-        replicate_rnng=args.replicate_rnng_data,
-        max_length=args.max_sentence_length)
+        replicate_rnng=args.replicate_rnng_data)
+
+  data_utils.write_conll_baseline(data_path + 'dev.baseline.conll', 
+      [sent.conll for sent in dev_sentences])
 
   #data_utils.create_length_histogram(sentences, args.working_dir)
 
   if args.small_data:
-    sentences = sentences[:50]
+    sentences = sentences[:500]
     #dev_sentences = dev_sentences
     dev_sentences = dev_sentences[:100]
 
@@ -729,8 +720,7 @@ if __name__=='__main__':
             pos_vocab, rel_vocab)
   elif args.score:
     val_sentences = test_sentences if args.test else dev_sentences
-    score(args, val_sentences, test_sentences, word_vocab, 
-            pos_vocab, rel_vocab)
+    score(args, val_sentences, word_vocab, pos_vocab, rel_vocab)
   elif args.unsup:
     stack_parser.train_unsup(args, sentences, dev_sentences, test_sentences, 
         word_vocab)
