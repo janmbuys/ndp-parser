@@ -27,13 +27,15 @@ import nn_utils
 
 class TransitionSystem():
   def __init__(self, vocab_size, num_relations, num_features, num_transitions,
-      embedding_size, hidden_size, num_layers, dropout, bidirectional, 
-      predict_relations, generative, decompose_actions, batch_size, use_cuda):
+      embedding_size, hidden_size, num_layers, dropout, init_weight_range, 
+      bidirectional, predict_relations, generative, decompose_actions, 
+      batch_size, use_cuda):
     self.use_cuda = use_cuda
+    self.vocab_size = vocab_size
     self.num_features = num_features
     self.num_transitions = num_transitions
     self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, 
-        embedding_size, hidden_size, num_layers, dropout,
+        embedding_size, hidden_size, num_layers, dropout, init_weight_range,
         bidirectional=bidirectional, use_cuda=use_cuda)
       
     feature_size = (hidden_size*2 if bidirectional else hidden_size)

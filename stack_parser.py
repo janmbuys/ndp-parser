@@ -35,17 +35,21 @@ def train_unsup(args, sentences, dev_sentences, test_sentences, word_vocab):
   # Build the model
   feature_size = args.hidden_size
   stack_model = dp_stack.DPStack(vocab_size, args.embedding_size,
-          args.hidden_size, args.num_layers, args.dropout, num_features,
-          args.cuda)
+          args.hidden_size, args.num_layers, args.dropout,
+          args.init_weight_range, num_features, args.cuda)
 
   if args.cuda:
     stack_model.cuda()
 
+  lr = args.lr 
   params = list(stack_model.parameters()) 
-  optimizer = optim.Adam(params, lr=args.lr)
-  lr = args.lr # TODO add new LM lr adjustments etc
+  if args.adam:
+    optimizer = optim.Adam(params, lr=lr)
+  else:
+    optimizer = optim.SGD(params, lr=lr)
  
   prev_val_loss = None
+  patience_count = 0
   for epoch in range(1, args.epochs+1):
     print('Start unsup training epoch %d' % epoch)
     epoch_start_time = time.time()
@@ -116,6 +120,7 @@ def train_unsup(args, sentences, dev_sentences, test_sentences, word_vocab):
     val_batch_size = 1
     total_loss = 0
     total_length = 0
+    total_length_more = 0
     dev_losses = []
     decode_start_time = time.time()
 
@@ -126,14 +131,19 @@ def train_unsup(args, sentences, dev_sentences, test_sentences, word_vocab):
       sentence_data = nn_utils.get_sentence_data_batch([val_sent], args.cuda,
           evaluation=True)
       loss = stack_model.neg_log_likelihood(sentence_data)
-      total_loss += loss
+      total_loss += loss.data
       dev_losses.append(loss.data[0])
       total_length += len(val_sent) - 1 
+      total_length_more += len(val_sent) 
 
-    val_loss = total_loss.data[0]  / total_length
+    val_loss = total_loss[0]  / total_length
+    val_loss_more = total_loss[0] / total_length_more
     print('-' * 89)
     print('| eval time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
-         (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
+        (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
+    print('                     | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(val_loss_more,
+        math.exp(val_loss_more)))
+
     print('-' * 89)
 
     if False: #TODO
@@ -158,8 +168,25 @@ def train_unsup(args, sentences, dev_sentences, test_sentences, word_vocab):
            (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
       print('-' * 89)
 
-    if args.save_model != '':
-      model_fn = args.working_dir + '/' + args.save_model + '_stack.pt'
-      with open(model_fn, 'wb') as f:
-        torch.save(stack_model, f)
+    # Anneal the learning rate.
+    if (not args.adam and args.num_init_lr_epochs > 0 
+        and epoch >= args.num_init_lr_epochs):
+      if args.reduce_lr and val_loss > prev_val_loss:
+        lr /= 2
+      else:
+        lr = lr / args.lr_decay
+      for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+    if prev_val_loss and val_loss > prev_val_loss:
+      patience_count += 1
+    else:
+      patience_count = 0
+      prev_val_loss = val_loss
+      # save the model
+      if args.save_model != '':
+        model_fn = args.working_dir + '/' + args.save_model + '_stack.pt'
+        with open(model_fn, 'wb') as f:
+          torch.save(stack_model, f)
+    if args.patience > 0 and patience_count >= args.patience:
+      break
 

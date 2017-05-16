@@ -28,15 +28,15 @@ import transition_system as tr
 
 class ArcEagerTransitionSystem(tr.TransitionSystem):
   def __init__(self, vocab_size, num_relations,
-      embedding_size, hidden_size, num_layers, dropout, bidirectional, 
-      more_context, predict_relations, generative, decompose_actions,
-      batch_size, use_cuda):
+      embedding_size, hidden_size, num_layers, dropout, init_weight_range, 
+      bidirectional, more_context, predict_relations, generative, 
+      decompose_actions, batch_size, use_cuda):
     assert not decompose_actions and not more_context
     num_transitions = 3
     num_features = 2
     super(ArcEagerTransitionSystem, self).__init__(vocab_size, num_relations,
-        num_features, num_transitions,
-        embedding_size, hidden_size, num_layers, dropout, bidirectional,
+        num_features, num_transitions, embedding_size, hidden_size, 
+        num_layers, dropout, init_weight_range, bidirectional,
         predict_relations, generative, decompose_actions,
         batch_size, use_cuda)
     self.more_context = False
@@ -86,8 +86,10 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
 
     actions = []
     labels = []
+    words = []
     transition_logits = []
     direction_logits = []
+    gen_word_logits = []
     relation_logits = []
     normalize = nn.Sigmoid()
 
@@ -100,9 +102,10 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
       label = -1
       s0 = stack.roots[-1].id if len(stack) > 0 else 0
 
+      position = nn_utils.extract_feature_positions(buffer_index, s0)
+      features = nn_utils.select_features(encoder_features, position, self.use_cuda)
+
       if len(stack) > 0: # allowed to ra or la
-        position = nn_utils.extract_feature_positions(buffer_index, s0)
-        features = nn_utils.select_features(encoder_features, position, self.use_cuda)
         transition_logit = self.transition_model(features)
         transition_logit_np = transition_logit.type(torch.FloatTensor).data.numpy()
         if buffer_index == sent_length:
@@ -131,6 +134,21 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
           relation_logit_np = relation_logit.type(torch.FloatTensor).data.numpy()
           label = int(relation_logit_np.argmax(axis=1)[0])
         
+      if self.word_model is not None and action == data_utils._SH:
+        word_logit = self.word_model(features)
+        gen_word_logits.append(word_logit)
+        if buffer_index+1 < sent_length:
+          word = conll[buffer_index+1].word_id
+        else:
+          word = data_utils._EOS
+      else:
+        word = -1
+        if self.word_model is not None:
+          gen_word_logits.append(None)
+
+      if self.word_model is not None:
+        words.append(word)
+
       transition_logits.append(transition_logit)
       actions.append(pred_action) 
       if self.relation_model is not None:
@@ -170,7 +188,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
           if self.relation_model is not None:
             conll[child.id].pred_relation_ind = label
     #print(actions)
-    return conll, transition_logits, None, actions, relation_logits, labels
+    return conll, transition_logits, None, actions, relation_logits, labels, gen_word_logits, words
    
 
   def oracle(self, conll, encoder_features):

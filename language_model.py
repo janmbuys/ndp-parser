@@ -60,11 +60,11 @@ if __name__=='__main__':
                       help='size of word embeddings')
   parser.add_argument('--hidden_size', type=int, default=128, 
                       help='humber of hidden units per layer')
-  parser.add_argument('--num_layers', type=int, default=1, # original 2
+  parser.add_argument('--num_layers', type=int, default=1,
                       help='number of layers')
-  parser.add_argument('--lr', type=float, default=0.0001, # default 20
+  parser.add_argument('--lr', type=float, default=0.0001,
                       help='initial learning rate')
-  parser.add_argument('--grad_clip', type=float, default=5, # default 0.5 check
+  parser.add_argument('--grad_clip', type=float, default=5,
                       help='gradient clipping')
   parser.add_argument('--num_init_lr_epochs', type=int, default=-1, 
                       help='number of epochs before learning rate decay')
@@ -308,6 +308,7 @@ if __name__=='__main__':
           math.exp(val_loss_more)))
        
       print('-' * 89)
+
       # Anneal the learning rate.
       if (not args.adam and args.num_init_lr_epochs > 0 
           and epoch >= args.num_init_lr_epochs):

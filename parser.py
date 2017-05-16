@@ -32,10 +32,11 @@ def training_decode(args, tr_system, dev_sentences, num_relations, epoch):
   val_batch_size = 1
   total_loss = 0
   total_length = 0
+  total_length_more = 0
   conll_predicted = []
 
-  criterion = nn.CrossEntropyLoss(size_average=args.criterion_size_average)
-  binary_criterion = nn.BCELoss(size_average=args.criterion_size_average)
+  criterion = nn.CrossEntropyLoss(size_average=False)
+  binary_criterion = nn.BCELoss(size_average=False)
 
   tr_system.encoder_model.eval()
   normalize = nn.Sigmoid() 
@@ -48,17 +49,15 @@ def training_decode(args, tr_system, dev_sentences, num_relations, epoch):
 
     if args.decompose_actions:
       if args.viterbi_decode:
-
-        predict, transition_logits, direction_logits, actions, relation_logits, labels = tr_system.viterbi_decode(val_sent.conll, encoder_output)
+        predict, transition_logits, direction_logits, actions, relation_logits, labels, gen_word_logits, words = tr_system.viterbi_decode(val_sent.conll, encoder_output)
         #print(actions)
       else:
-        predict, transition_logits, direction_logits, actions, relation_logits, labels = tr_system.greedy_decode(
+        predict, transition_logits, direction_logits, actions, relation_logits, labels, gen_word_logits, words = tr_system.greedy_decode(
           val_sent.conll, encoder_output)
     else:
-      predict, transition_logits, _, actions, relation_logits, labels = tr_system.greedy_decode(
+      predict, transition_logits, _, actions, relation_logits, labels, gen_word_logits, words = tr_system.greedy_decode(
         val_sent.conll, encoder_output)
 
-    #TODO need to compute word probabilities here
     for j, token in enumerate(predict):
       # Convert labels to str
       if j > 0 and tr_system.relation_model is not None and token.pred_relation_ind >= 0:
@@ -79,6 +78,15 @@ def training_decode(args, tr_system, dev_sentences, num_relations, epoch):
          actions, use_cuda=args.cuda)
 
     total_length += len(val_sent) - 1
+    total_length_more += len(val_sent) 
+
+    if args.generative:
+      gen_word_output, word_var = nn_utils.filter_logits(gen_word_logits, words, use_cuda=args.cuda)
+      if gen_word_output is not None:
+        word_loss = criterion(gen_word_output.view(-1, tr_system.vocab_size),
+                              word_var).data
+        total_loss += word_loss
+
     if transition_output is not None:
       if args.decompose_actions:
         tr_loss = binary_criterion(normalize(transition_output.view(-1)),
@@ -100,33 +108,33 @@ def training_decode(args, tr_system, dev_sentences, num_relations, epoch):
 
   working_path = args.working_dir + '/'
   data_utils.write_conll(working_path + args.dev_name + '.' + str(epoch) + '.output.conll', conll_predicted)
-  val_loss = total_loss[0] / total_length
-  return val_loss, total_length
+  return total_loss, total_length, total_length_more
 
 
 def train(args, sentences, dev_sentences, test_sentences, word_vocab, 
           pos_vocab, rel_vocab):
   vocab_size = len(word_vocab)
   num_relations = len(rel_vocab)
-  print(str(num_relations) + ' relations')
+  lr = args.lr
 
   # Build the model
   assert args.arc_hybrid or args.arc_eager
   if args.arc_hybrid:
     tr_system = arc_hybrid.ArcHybridTransitionSystem(vocab_size,
         num_relations, args.embedding_size, 
-        args.hidden_size, args.num_layers, args.dropout, args.bidirectional, 
+        args.hidden_size, args.num_layers, args.dropout,
+        args.init_weight_range, args.bidirectional, 
         args.use_more_features, args.predict_relations, args.generative,
         args.decompose_actions, args.batch_size, args.cuda)
   elif args.arc_eager:
     tr_system = arc_eager.ArcEagerTransitionSystem(vocab_size,
-        num_relations, args.embedding_size, 
-        args.hidden_size, args.num_layers, args.dropout, args.bidirectional, 
+        num_relations, args.embedding_size, args.hidden_size, args.num_layers,
+        args.dropout, args.init_weight_range, args.bidirectional, 
         args.use_more_features, args.predict_relations, args.generative,
         args.decompose_actions, args.batch_size, args.cuda)
 
-  criterion = nn.CrossEntropyLoss(size_average=args.criterion_size_average)
-  binary_criterion = nn.BCELoss(size_average=args.criterion_size_average)
+  criterion = nn.CrossEntropyLoss(size_average=False)
+  binary_criterion = nn.BCELoss(size_average=False)
 
   params = (list(tr_system.encoder_model.parameters()) 
             + list(tr_system.transition_model.parameters()))
@@ -137,10 +145,14 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
   if args.decompose_actions:
     params += list(tr_system.direction_model.parameters())
 
-  optimizer = optim.Adam(params, lr=args.lr)
+  if args.adam:
+    optimizer = optim.Adam(params, lr=lr)
+  else:
+    optimizer = optim.SGD(params, lr=lr)
+
   batch_size = 1
- 
   prev_val_loss = None
+  patience_count = 0
   for epoch in range(1, args.epochs+1):
     print('Start training epoch %d' % epoch)
     epoch_start_time = time.time()
@@ -274,31 +286,12 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
         epoch, len(sentences), global_num_tokens,
         avg_global_loss, math.exp(avg_global_loss)))
 
-    working_path = args.working_dir + '/'
-    # Saves the model. #TODO save only parameters
-    if args.save_model != '':
-      model_fn = working_path + args.save_model + '_encoder.pt'
-      with open(model_fn, 'wb') as f:
-        torch.save(tr_system.encoder_model, f)
-      model_fn = working_path + args.save_model + '_transition.pt'
-      with open(model_fn, 'wb') as f:
-        torch.save(tr_system.transition_model, f)
-      if args.predict_relations:
-        model_fn = working_path + args.save_model + '_relation.pt'
-        with open(model_fn, 'wb') as f:
-          torch.save(tr_system.relation_model, f)
-      if args.generative:
-        model_fn = working_path + args.save_model + '_word.pt'
-        with open(model_fn, 'wb') as f:
-          torch.save(tr_system.word_model, f)
-      if args.decompose_actions:
-        model_fn = working_path + args.save_model + '_direction.pt'
-        with open(model_fn, 'wb') as f:
-          torch.save(tr_system.direction_model, f)
-
     decode_start_time = time.time()
-    val_loss, total_length = training_decode(args, tr_system, dev_sentences, 
-        num_relations, epoch)
+    total_loss, total_length, total_length_more = training_decode(args, 
+        tr_system, dev_sentences, num_relations, epoch)
+    val_loss = total_loss[0] / total_length
+    val_loss_more = total_loss[0] / total_length_more
+
     print('-' * 89)
     print('| end of epoch {:3d} | time: {:5.2f}s | {:5d} tokens | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
         epoch, (time.time() - epoch_start_time), total_length, val_loss,
@@ -306,6 +299,44 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
     print('decoding time: {:5.2f}s'.format(time.time() - decode_start_time))
     print('-' * 89)
 
+    # Anneal the learning rate.
+    if (not args.adam and args.num_init_lr_epochs > 0 
+        and epoch >= args.num_init_lr_epochs):
+      if args.reduce_lr and val_loss > prev_val_loss:
+        lr /= 2
+      else:
+        lr = lr / args.lr_decay
+      for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+    if prev_val_loss and val_loss > prev_val_loss:
+      patience_count += 1
+    else:
+      patience_count = 0
+      prev_val_loss = val_loss
+      # save the model
+      working_path = args.working_dir + '/'
+      # Saves the model. #TODO save only parameters
+      if args.save_model != '':
+        model_fn = working_path + args.save_model + '_encoder.pt'
+        with open(model_fn, 'wb') as f:
+          torch.save(tr_system.encoder_model, f)
+        model_fn = working_path + args.save_model + '_transition.pt'
+        with open(model_fn, 'wb') as f:
+          torch.save(tr_system.transition_model, f)
+        if args.predict_relations:
+          model_fn = working_path + args.save_model + '_relation.pt'
+          with open(model_fn, 'wb') as f:
+            torch.save(tr_system.relation_model, f)
+        if args.generative:
+          model_fn = working_path + args.save_model + '_word.pt'
+          with open(model_fn, 'wb') as f:
+            torch.save(tr_system.word_model, f)
+        if args.decompose_actions:
+          model_fn = working_path + args.save_model + '_direction.pt'
+          with open(model_fn, 'wb') as f:
+            torch.save(tr_system.direction_model, f)
+    if args.patience > 0 and patience_count >= args.patience:
+      break
 
 #TODO update
 def score(args, dev_sentences, test_sentences, word_vocab, pos_vocab, 
@@ -353,6 +384,7 @@ def score(args, dev_sentences, test_sentences, word_vocab, pos_vocab,
 
   print('Done loading models')
 
+  # TODO put in a method
   val_batch_size = 1
   total_loss = 0
   total_length = 0
@@ -561,6 +593,10 @@ if __name__=='__main__':
   parser.add_argument('--score', action='store_true', 
                       help='Only score, assuming existing model', 
                       default=False)
+  parser.add_argument('--test', action='store_true', 
+                      help='Evaluate test set', 
+                      default=False)
+
   parser.add_argument('--viterbi_decode', action='store_true',
                       help='Perform Viterbi decoding')
   parser.add_argument('--inside_decode', action='store_true',
@@ -584,6 +620,21 @@ if __name__=='__main__':
                       help='upper epoch limit')
   parser.add_argument('--batch_size', type=int, default=1, metavar='N',
                       help='batch size')
+  parser.add_argument('--num_init_lr_epochs', type=int, default=-1, 
+                      help='number of epochs before learning rate decay')
+  parser.add_argument('--patience', type=int, default=10, 
+                      help='Stop training if not improving for some number of epochs')
+  parser.add_argument('--lr_decay', type=float, default=1.1,
+                      help='learning rate decay per epoch')
+  parser.add_argument('--tie_weights', action='store_true',
+                      help='tie the word embedding and softmax weights')
+  parser.add_argument('--reduce_lr', action='store_true',
+                      help='reduce lr if val ppl does not improve')
+  parser.add_argument('--init_weight_range', type=float, default=0.1,
+                      help='weight initialization range')
+  parser.add_argument('--adam', action='store_true',
+                      help='use Adam optimizer')
+
   parser.add_argument('--dropout', type=float, default=0.0, 
                       help='dropout rate')
   parser.add_argument('--bidirectional', action='store_true',
@@ -669,7 +720,7 @@ if __name__=='__main__':
   #data_utils.create_length_histogram(sentences, args.working_dir)
 
   if args.small_data:
-    sentences = sentences[:100]
+    sentences = sentences[:50]
     #dev_sentences = dev_sentences
     dev_sentences = dev_sentences[:100]
 
@@ -677,7 +728,8 @@ if __name__=='__main__':
     decode(args, dev_sentences, test_sentences, word_vocab, 
             pos_vocab, rel_vocab)
   elif args.score:
-    score(args, dev_sentences, test_sentences, word_vocab, 
+    val_sentences = test_sentences if args.test else dev_sentences
+    score(args, val_sentences, test_sentences, word_vocab, 
             pos_vocab, rel_vocab)
   elif args.unsup:
     stack_parser.train_unsup(args, sentences, dev_sentences, test_sentences, 

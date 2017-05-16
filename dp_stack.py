@@ -16,11 +16,11 @@ class DPStack(nn.Module):
   """Stack-based generative model with dynamic programming inference.""" 
 
   def __init__(self, vocab_size, embedding_size, hidden_size, num_layers,
-               dropout, num_features, use_cuda):
+               dropout, init_weight_range, num_features, use_cuda):
     super(DPStack, self).__init__()
     self.use_cuda = use_cuda
     self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, embedding_size, 
-        hidden_size, num_layers, dropout, bidirectional=False, use_cuda=use_cuda)
+        hidden_size, num_layers, dropout, init_weight_range, bidirectional=False, use_cuda=use_cuda)
 
     feature_size = hidden_size
     self.transition_model = binary_classifier.BinaryClassifier(num_features, 
