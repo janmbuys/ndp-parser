@@ -32,8 +32,11 @@ class TransitionSystem():
       batch_size, use_cuda, model_path='', load_model=False):
     self.use_cuda = use_cuda
     self.vocab_size = vocab_size
+    self.decompose_actions = decompose_actions
     self.num_features = num_features
     self.num_transitions = num_transitions
+    self.log_normalize = nn.LogSoftmax()
+    self.binary_normalize = nn.Sigmoid()
 
     if load_model:
       assert model_path != ''
@@ -74,7 +77,7 @@ class TransitionSystem():
           hidden_size, num_transitions, use_cuda) 
         self.direction_model = None
 
-      if predict_relations:
+      if predict_relations: #TODO use extended feature space
         self.relation_model = classifier.Classifier(num_features, feature_size, 
             hidden_size, num_relations, use_cuda)
       else:

@@ -175,30 +175,42 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
 
   def viterbi_decode(self, conll, encoder_features):
     sent_length = len(conll) # includes root, but not EOS
-    log_normalize = nn.LogSoftmax()
-    binary_normalize = nn.Sigmoid()
     eps = np.exp(-10) # used to avoid division by 0
 
     # compute all sh/re and word probabilities
     seq_length = sent_length + 1
-    reduce_probs = np.zeros([seq_length, seq_length])
-    ra_probs = np.zeros([seq_length, seq_length])
+    if self.decompose_actions:
+      reduce_probs = np.zeros([seq_length, seq_length])
+      ra_probs = np.zeros([seq_length, seq_length])
+    else:
+      shift_log_probs = np.zeros([seq_length, seq_length])
+      la_log_probs = np.zeros([seq_length, seq_length])
+      ra_log_probs = np.zeros([seq_length, seq_length])
     word_log_probs = np.empty([sent_length, sent_length])
     word_log_probs.fill(-np.inf)
 
     # batch feature computation
     features = nn_utils.batch_feature_selection(encoder_features, seq_length,
         self.use_cuda)
-    re_probs_list = nn_utils.to_numpy(binary_normalize(self.transition_model(features)))
-    ra_probs_list = nn_utils.to_numpy(binary_normalize(self.direction_model(features)))
+    if self.decompose_actions:
+      re_probs_list = nn_utils.to_numpy(self.binary_normalize(self.transition_model(features)))
+      ra_probs_list = nn_utils.to_numpy(self.binary_normalize(self.direction_model(features)))
+    else:
+      tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(self.transition_model(features)))
+
     if self.word_model is not None:
-      word_dist = log_normalize(self.word_model(features))
+      word_dist = self.log_normalize(self.word_model(features))
 
     counter = 0 
     for i in range(seq_length-1):
       for j in range(i+1, seq_length):
-        reduce_probs[i, j] = re_probs_list[counter, 0]
-        ra_probs[i, j] = ra_probs_list[counter, 0]
+        if self.decompose_actions:
+          reduce_probs[i, j] = re_probs_list[counter, 0]
+          ra_probs[i, j] = ra_probs_list[counter, 0]
+        else:
+          shift_log_probs[i, j] = tr_log_probs_list[counter, data_utils._SH]
+          la_log_probs[i, j] = tr_log_probs_list[counter, data_utils._LA]
+          ra_log_probs[i, j] = tr_log_probs_list[counter, data_utils._RA]
         if self.word_model is not None and j < sent_length:
           if j < sent_length - 1:
             word_id = conll[j+1].word_id 
@@ -217,14 +229,17 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
     # first word prob 
     if self.word_model is not None:
       init_features = nn_utils.select_features(encoder_features, [0, 0], self.use_cuda)
-      word_dist = log_normalize(self.word_model(init_features).view(-1))
+      word_dist = self.log_normalize(self.word_model(init_features).view(-1))
       table[0, 0, 1] = nn_utils.to_numpy(word_dist[conll[1].word_id])
     else:
       table[0, 0, 1] = 0
 
     for j in range(2, sent_length+1):
       for i in range(j-1):
-        score = np.log(1 - reduce_probs[i, j-1] + eps) 
+        if self.decompose_actions:
+          score = np.log(1 - reduce_probs[i, j-1] + eps)
+        else:
+          score = shift_log_probs[i, j-1]
         if self.word_model is not None:
           score += word_log_probs[i, j-1]
         table[i, j-1, j] = score
@@ -233,8 +248,9 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
           block_scores = [] # adjust indexes after collecting scores
           block_directions = []
           for k in range(i+1, j):
-            score = table[l, i, k] + table[i, k, j] + np.log(reduce_probs[k, j] + eps)
-            if self.direction_model is not None:
+            score = table[l, i, k] + table[i, k, j] 
+            if self.decompose_actions:
+              score += np.log(reduce_probs[k, j] + eps)
               ra_prob = ra_probs[k, j]
               if ra_prob > 0.5 or j == sent_length:
                 score += np.log(ra_prob)
@@ -242,17 +258,25 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
               else:
                 score += np.log(1-ra_prob)
                 block_directions.append(data_utils._DLA)
+            else:
+              ra_prob = ra_log_probs[k, j]
+              la_prob = la_log_probs[k, j]
+              if ra_prob > la_prob or j == sent_length:
+                score += ra_prob
+                block_directions.append(data_utils._DRA)
+              else:
+                score += la_prob
+                block_directions.append(data_utils._DLA)
+
             block_scores.append(score)
           ind = np.argmax(block_scores)
           k = ind + i + 1
           table[l, i, j] = block_scores[ind]
           split_indexes[l, i, j] = k
-          if self.direction_model is not None:
-            directions[l, i, j] = block_directions[ind]
+          directions[l, i, j] = block_directions[ind]
 
     def backtrack_path(l, i, j):
       """ Find action sequence for best path. """
-      #TODO add label prediction
       if i == j - 1:
         return [data_utils._SH]
       else:
@@ -380,32 +404,44 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
     return conll, transition_logits, direction_logits, actions, relation_logits, labels, gen_word_logits, words
    
 
-  def inside_score_decode(self, conll, encoder_features):
-    '''Compute inside score for testing, not training.'''
+  '''compute inside score for testing, not training.'''
+  def inside_score(self, conll, encoder_features):
     assert self.word_model is not None
-    sent_length = len(conll) # includes root, but not EOS
-    log_normalize = nn.LogSoftmax()
-    binary_normalize = nn.Sigmoid()
+    sent_length = len(conll) # includes root, but not eos
     eps = np.exp(-10) # used to avoid division by 0
 
     # compute all sh/re and word probabilities
     seq_length = sent_length + 1
-    reduce_probs = np.zeros([seq_length, seq_length])
-    ra_probs = np.zeros([seq_length, seq_length])
+    if self.decompose_actions:
+      reduce_probs = np.zeros([seq_length, seq_length])
+      ra_probs = np.zeros([seq_length, seq_length])
+    else:
+      shift_log_probs = np.zeros([seq_length, seq_length])
+      re_log_probs = np.zeros([seq_length, seq_length])
     word_log_probs = np.empty([sent_length, sent_length])
     word_log_probs.fill(-np.inf)
 
     # batch feature computation
     features = nn_utils.batch_feature_selection(encoder_features, seq_length,
         self.use_cuda)
-    re_probs_list = nn_utils.to_numpy(binary_normalize(self.transition_model(features)))
-    word_dist = log_normalize(self.word_model(features))
+    if self.decompose_actions:
+      re_probs_list = nn_utils.to_numpy(self.binary_normalize(self.transition_model(features)))
+    else:
+      tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(self.transition_model(features)))
+
+    word_dist = self.log_normalize(self.word_model(features))
 
     counter = 0 
     for i in range(seq_length-1):
       for j in range(i+1, seq_length):
-        reduce_probs[i, j] = re_probs_list[counter, 0]
-        if self.word_model is not None and j < sent_length:
+        if self.decompose_actions:
+          reduce_probs[i, j] = re_probs_list[counter, 0]
+        else:
+          shift_log_probs[i, j] = tr_log_probs_list[counter, data_utils._SH]
+          re_log_probs[i, j] = np.logaddexp(
+              tr_log_probs_list[counter, data_utils._LA], 
+              tr_log_probs_list[counter, data_utils._RA])
+        if j < sent_length:
           if j < sent_length - 1:
             word_id = conll[j+1].word_id 
           else:
@@ -418,27 +454,29 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
     table.fill(-np.inf) # log probabilities
 
     # first word prob 
-    if self.word_model is not None:
-      init_features = nn_utils.select_features(encoder_features, [0, 0], self.use_cuda)
-      word_dist = log_normalize(self.word_model(init_features).view(-1))
-      table[0, 0, 1] = nn_utils.to_numpy(word_dist[conll[1].word_id])
-    else:
-      table[0, 0, 1] = 0
+    init_features = nn_utils.select_features(encoder_features, [0, 0], self.use_cuda)
+    word_dist = self.log_normalize(self.word_model(init_features).view(-1))
+    table[0, 0, 1] = nn_utils.to_numpy(word_dist[conll[1].word_id])
 
     for j in range(2, sent_length+1):
       for i in range(j-1):
-        score = np.log(1 - reduce_probs[i, j-1] + eps) 
-        if self.word_model is not None:
-          score += word_log_probs[i, j-1]
+        if self.decompose_actions:
+          score = np.log(1 - reduce_probs[i, j-1] + eps) 
+        else:
+          score = shift_log_probs[i, j-1]
+        score += word_log_probs[i, j-1]
         table[i, j-1, j] = score
       for i in range(j-2, -1, -1):
         for l in range(max(i, 1)): # l=0 if i=0
-          score = -np.inf
+          block_score = -np.inf
           for k in range(i+1, j):
-            item_score = (table[l, i, k] + table[i, k, j] 
-                          + np.log(reduce_probs[k, j] + eps))
-            score = np.logaddexp(score, item_score)
-          table[l, i, j] = score
+            item_score = table[l, i, k] + table[i, k, j] 
+            if self.decompose_actions:
+              item_score += np.log(reduce_probs[k, j] + eps)
+            else:
+              item_score += re_log_probs[k, j]
+            block_score = np.logaddexp(block_score, item_score)
+          table[l, i, j] = block_score
     return table[0, 0, sent_length]
 
 

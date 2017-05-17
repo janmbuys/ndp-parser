@@ -47,16 +47,12 @@ def training_decode(args, tr_system, dev_sentences, num_relations, epoch):
     encoder_state = tr_system.encoder_model.init_hidden(val_batch_size)
     encoder_output = tr_system.encoder_model(sentence_data, encoder_state)
 
-    if args.decompose_actions:
-      if args.viterbi_decode:
-        predict, transition_logits, direction_logits, actions, relation_logits, labels, gen_word_logits, words = tr_system.viterbi_decode(val_sent.conll, encoder_output)
-        #print(actions)
-      else:
-        predict, transition_logits, direction_logits, actions, relation_logits, labels, gen_word_logits, words = tr_system.greedy_decode(
+    if args.viterbi_decode:
+      predict, transition_logits, direction_logits, actions, relation_logits, labels, gen_word_logits, words = tr_system.viterbi_decode(
           val_sent.conll, encoder_output)
     else:
-      predict, transition_logits, _, actions, relation_logits, labels, gen_word_logits, words = tr_system.greedy_decode(
-        val_sent.conll, encoder_output)
+      predict, transition_logits, direction_logits, actions, relation_logits, labels, gen_word_logits, words = tr_system.greedy_decode(
+          val_sent.conll, encoder_output)
 
     for j, token in enumerate(predict):
       # Convert labels to str
@@ -111,6 +107,33 @@ def training_decode(args, tr_system, dev_sentences, num_relations, epoch):
   return total_loss, total_length, total_length_more
 
 
+def training_score(args, tr_system, val_sentences):
+  val_batch_size = 1
+  total_loss = 0
+  total_length = 0
+  total_length_more = 0
+
+  tr_system.encoder_model.eval()
+  normalize = nn.Sigmoid() 
+  if not args.generative:
+    word_model = None
+
+  print('Scoring val sentences')
+  for val_sent in val_sentences:
+    sentence_loss = 0
+
+    sentence_data = nn_utils.get_sentence_data_batch([val_sent], args.cuda, evaluation=True)
+    encoder_state = tr_system.encoder_model.init_hidden(val_batch_size)
+    encoder_output = tr_system.encoder_model(sentence_data, encoder_state)
+    total_length += len(val_sent) - 1 
+    total_length_more += len(val_sent) 
+
+    score = tr_system.inside_score(val_sent.conll, encoder_output)
+    total_loss += score
+
+  return total_loss, total_length, total_length_more
+
+
 def train(args, sentences, dev_sentences, test_sentences, word_vocab, 
           pos_vocab, rel_vocab):
   vocab_size = len(word_vocab)
@@ -158,7 +181,7 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
     epoch_start_time = time.time()
     
     random.shuffle(sentences)
-    #sentences.sort(key=len) 
+    sentences.sort(key=len) 
 
     total_loss = 0 
     global_loss = 0 
@@ -296,10 +319,26 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
     print('| end of epoch {:3d} | time: {:5.2f}s | {:5d} tokens | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
         epoch, (time.time() - epoch_start_time), total_length, val_loss,
         math.exp(val_loss)))
-    print('decoding time: {:5.2f}s'.format(time.time() - decode_start_time))
     print('                     | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(
         val_loss_more, math.exp(val_loss_more)))
     print('-' * 89)
+    print('decoding time: {:5.2f}s'.format(time.time() - decode_start_time))
+
+    if args.generative:
+      # score the model 
+      decode_start_time = time.time()
+      total_loss, total_length, total_length_more = training_score(args,
+          tr_system, dev_sentences)
+
+      val_loss = - total_loss / total_length
+      val_loss_more = - total_loss / total_length_more
+
+      print('-' * 89)
+      print('| scoring time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
+           (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
+      print('                     | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(
+           val_loss_more, math.exp(val_loss_more)))
+      print('-' * 89)
 
     # Anneal the learning rate.
     if (not args.adam and args.num_init_lr_epochs > 0 
@@ -340,7 +379,6 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
     if args.patience > 0 and patience_count >= args.patience:
       break
 
-#TODO update
 def score(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
   vocab_size = len(word_vocab)
   num_relations = len(rel_vocab)
@@ -369,35 +407,9 @@ def score(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
 
   print('Done loading models')
 
-  # TODO put in a method
-  val_batch_size = 1
-  total_loss = 0
-  total_length = 0
-  total_length_more = 0
-  conll_predicted = []
-  dev_losses = []
   decode_start_time = time.time()
-
-  tr_system.encoder_model.eval()
-  normalize = nn.Sigmoid() 
-  if not args.generative:
-    word_model = None
-
-  print('Scoring val sentences')
-  for val_sent in val_sentences:
-    sentence_loss = 0
-
-
-    sentence_data = nn_utils.get_sentence_data_batch([val_sent], args.cuda, evaluation=True)
-    encoder_state = tr_system.encoder_model.init_hidden(val_batch_size)
-    encoder_output = tr_system.encoder_model(sentence_data, encoder_state)
-    total_length += len(val_sent) - 1 
-    total_length_more += len(val_sent) 
-
-    score = tr_system.inside_score_decode(val_sent.conll, encoder_output)
-    #print(score)
-    dev_losses.append(score)
-    total_loss += score
+  total_loss, total_length, total_length_more = training_score(args,
+          tr_system, val_sentences)
 
   val_loss = - total_loss / total_length
   val_loss_more = - total_loss / total_length_more
@@ -409,7 +421,6 @@ def score(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
        val_loss_more, math.exp(val_loss_more)))
   print('-' * 89)
 
-#TODO update
 def decode(args, dev_sentences, test_sentences, word_vocab, pos_vocab, 
            rel_vocab):
   vocab_size = len(word_vocab)
@@ -474,7 +485,6 @@ def decode(args, dev_sentences, test_sentences, word_vocab, pos_vocab,
     encoder_output = encoder_model(sentence_data, encoder_state)
     total_length += len(val_sent) - 1 
 
-    #TODO evaluate word prediction for generative model
     if args.decompose_actions:
       if args.viterbi_decode:
         predict, transition_logits, direction_logits, actions, relation_logits, labels = viterbi_decode(
@@ -513,18 +523,10 @@ def decode(args, dev_sentences, test_sentences, word_vocab, pos_vocab,
       if args.decompose_actions:
         tr_loss = binary_criterion(normalize(transition_output.view(-1)),
                                 action_var).data
-        #if math.isnan(tr_loss[0]):
-        #  print('Transition loss')
-        #  print(transition_output)
-        #  print(action_var)
         sentence_loss += tr_loss
         if direction_output is not None:
           dir_loss = binary_criterion(normalize(direction_output.view(-1)),
                                   dir_var).data
-          #if math.isnan(dir_loss[0]):
-          #  print('Direction loss')
-          #  print(direction_output)
-          #  print(dir_var)
           sentence_loss += dir_loss
       else:
         sentence_loss += criterion(transition_output.view(-1, num_transitions),
@@ -668,8 +670,6 @@ if __name__=='__main__':
   args = parser.parse_args()
   assert not (args.generative and args.bidirectional), 'Bidirectional encoder invalid for generative model'
   assert args.arc_hybrid or args.arc_eager or args.unsup
-  if args.viterbi_decode or args.inside_decode:
-    assert args.decompose_actions, 'Decomposed actions required for dynamic programming'
   assert not (args.use_more_features and args.decompose_actions), 'For decomposed features use small contexts'
 
   # TODO check if this has the same effect across different files
@@ -711,9 +711,9 @@ if __name__=='__main__':
   #data_utils.create_length_histogram(sentences, args.working_dir)
 
   if args.small_data:
-    sentences = sentences[:500]
+    sentences = sentences[:100]
     #dev_sentences = dev_sentences
-    dev_sentences = dev_sentences[:100]
+    dev_sentences = dev_sentences[:200]
 
   if args.decode:          
     decode(args, dev_sentences, test_sentences, word_vocab, 
