@@ -37,6 +37,7 @@ class TransitionSystem():
     self.num_transitions = num_transitions
     self.log_normalize = nn.LogSoftmax()
     self.binary_normalize = nn.Sigmoid()
+    self.feature_size = (hidden_size*2 if bidirectional else hidden_size)
 
     if load_model:
       assert model_path != ''
@@ -61,30 +62,28 @@ class TransitionSystem():
           self.direction_model = torch.load(f)
 
     else: 
-      feature_size = (hidden_size*2 if bidirectional else hidden_size)
-
       self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, 
           embedding_size, hidden_size, num_layers, dropout, init_weight_range,
           bidirectional=bidirectional, use_cuda=use_cuda)
         
       if decompose_actions:
         self.transition_model = binary_classifier.BinaryClassifier(num_features, 
-          feature_size, hidden_size, use_cuda) 
+          self.feature_size, hidden_size, use_cuda) 
         self.direction_model = binary_classifier.BinaryClassifier(num_features, 
-          feature_size, hidden_size, use_cuda) 
+          self.feature_size, hidden_size, use_cuda) 
       else:
-        self.transition_model = classifier.Classifier(num_features, feature_size, 
+        self.transition_model = classifier.Classifier(num_features, self.feature_size, 
           hidden_size, num_transitions, use_cuda) 
         self.direction_model = None
 
       if predict_relations: #TODO use extended feature space
-        self.relation_model = classifier.Classifier(num_features, feature_size, 
+        self.relation_model = classifier.Classifier(num_features, self.feature_size, 
             hidden_size, num_relations, use_cuda)
       else:
         self.relation_model = None
         
       if generative:
-        self.word_model = classifier.Classifier(num_features, feature_size,
+        self.word_model = classifier.Classifier(num_features, self.feature_size,
                 hidden_size, vocab_size, use_cuda)
       else:
         self.word_model = None

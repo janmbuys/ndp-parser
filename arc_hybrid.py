@@ -62,117 +62,6 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
     
     return stackops, directions
 
-  def _decode_action_sequence(self, conll, actions, encoder_features):
-    """Execute a given action sequence, also find best relations."""
-    stack = data_utils.ParseForest([])
-    buf = data_utils.ParseForest([conll[0]])
-    buffer_index = 0
-    sent_length = len(conll)
-
-    labels = []
-    words = []
-    transition_logits = []
-    gen_word_logits = []
-    direction_logits = []
-    relation_logits = []
-    normalize = nn.Sigmoid()
-
-    for action in actions:
-      transition_logit = None
-      relation_logit = None
-      direction_logit = None
-
-      label = -1
-      s0 = stack.roots[-1].id if len(stack) > 0 else 0
-      s1 = stack.roots[-2].id if len(stack) > 1 else 0
-      s2 = stack.roots[-3].id if len(stack) > 2 else 0
-
-      position = nn_utils.extract_feature_positions(buffer_index, s0, s1, s2,
-          self.more_context)
-      features = nn_utils.select_features(encoder_features, position, self.use_cuda)
-        
-      if len(stack) > 1: # allowed to ra or la
-        if self.direction_model is not None: 
-          transition_logit = self.transition_model(features)
-          if buffer_index == sent_length:
-            assert action == data_utils._RA
-            sh_action = data_utils._SRE 
-          else: 
-            transition_sigmoid = normalize(transition_logit)
-            transition_sigmoid_np = transition_sigmoid.type(torch.FloatTensor).data.numpy()
-            if action == data_utils._SH:
-              sh_action = data_utils._SSH
-            else:
-              sh_action = data_utils._SRE
-          if sh_action == data_utils._SRE:
-            direction_logit = self.direction_model(features)  
-            direction_sigmoid = normalize(direction_logit)
-            direction_sigmoid_np = direction_sigmoid.type(torch.FloatTensor).data.numpy()
-            if buffer_index == sent_length:
-              assert action == data_utils._RA
-              direc = data_utils._DRA
-            elif action == data_utils._LA:
-              direc = data_utils._DLA  
-            else:
-              direc = data_utils._DRA
-            direction_logits.append(direction_logit)
-          else:
-            assert action == data_utils._SH
-            direction_logits.append(None)
-        else:
-          transition_logit = self.transition_model(features)
-          transition_logit_np = transition_logit.type(torch.FloatTensor).data.numpy()
-          if buffer_index == sent_length:
-            assert action == data_utils._RA
-        
-        if self.relation_model is not None and action != data_utils._SH:
-          relation_logit = self.relation_model(features)      
-          relation_logit_np = relation_logit.type(torch.FloatTensor).data.numpy()
-          label = int(relation_logit_np.argmax(axis=1)[0])
-
-      if self.word_model is not None and action == data_utils._SH:
-        word_logit = self.word_model(features)
-        gen_word_logits.append(word_logit)
-        if buffer_index+1 < sent_length:
-          word = conll[buffer_index+1].word_id
-        else:
-          word = data_utils._EOS
-      else:
-        word = -1
-        if self.word_model is not None:
-          gen_word_logits.append(None)
-
-      if self.word_model is not None:
-        words.append(word) 
-        
-      transition_logits.append(transition_logit)
-      if self.relation_model is not None:
-        relation_logits.append(relation_logit)
-        labels.append(label)
-
-      # excecute action
-      if action == data_utils._SH:
-        stack.roots.append(buf.roots[0]) 
-        buffer_index += 1
-        if buffer_index == sent_length:
-          buf = data_utils.ParseForest([])
-        else:
-          buf = data_utils.ParseForest([conll[buffer_index]])
-      else:  
-        assert len(stack) > 0
-        child = stack.roots.pop()
-        if action == data_utils._LA:
-          buf.roots[0].children.append(child) 
-          conll[child.id].pred_parent_id = buf.roots[0].id
-        else:
-          stack.roots[-1].children.append(child)
-          conll[child.id].pred_parent_id = stack.roots[-1].id
-        if self.relation_model is not None:
-          conll[child.id].pred_relation_ind = label
-
-    return conll, transition_logits, direction_logits, actions, relation_logits, labels, gen_word_logits, words
-
-
   def viterbi_decode(self, conll, encoder_features):
     sent_length = len(conll) # includes root, but not EOS
     eps = np.exp(-10) # used to avoid division by 0
@@ -287,16 +176,17 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
 
     actions = backtrack_path(0, 0, sent_length)
     #print(table[0, 0, sent_length]) # scores should match
-    return self._decode_action_sequence(conll, actions, encoder_features)
+    return self.greedy_decode(conll, encoder_features, actions)
 
-  def greedy_decode(self, conll, encoder_features):
+  def greedy_decode(self, conll, encoder_features, given_actions=None):
     #TODO have versions with and without scoring
     stack = data_utils.ParseForest([])
     buf = data_utils.ParseForest([conll[0]])
     buffer_index = 0
     sent_length = len(conll)
 
-    actions = []
+    num_actions = 0
+    predicted_actions = []
     labels = []
     words = []
     transition_logits = []
@@ -310,7 +200,12 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
       relation_logit = None
       direction_logit = None
 
-      action = data_utils._SH
+      if given_actions is not None:
+        assert len(given_actions) > num_actions
+        action = given_actions[num_actions]
+      else:
+        action = data_utils._SH
+
       label = -1
       s0 = stack.roots[-1].id if len(stack) > 0 else 0
       s1 = stack.roots[-2].id if len(stack) > 1 else 0
@@ -322,36 +217,58 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
 
       if len(stack) > 1: # allowed to ra or la
         #TODO rather score transition and relation jointly for greedy choice
-        if self.direction_model is not None: # find action from decomposed 
+        if self.direction_model is not None:
           transition_logit = self.transition_model(features)
           if buffer_index == sent_length:
+            if given_actions is not None:
+              assert action == data_utils._RA
             sh_action = data_utils._SRE 
-          else: #TODO instead of sigmoid can just test > 0
+          else: #TODO instead of sigmoid can just test > 0 if not scoring
             transition_sigmoid = normalize(transition_logit)
             transition_sigmoid_np = transition_sigmoid.type(torch.FloatTensor).data.numpy()
-            sh_action = int(np.round(transition_sigmoid_np)[0])
+            if given_actions is not None:
+              if action == data_utils._SH:
+                sh_action = data_utils._SSH
+              else:
+                sh_action = data_utils._SRE
+            else:    
+              sh_action = int(np.round(transition_sigmoid_np)[0])
           if sh_action == data_utils._SRE:
             direction_logit = self.direction_model(features)  
             direction_sigmoid = normalize(direction_logit)
             direction_sigmoid_np = direction_sigmoid.type(torch.FloatTensor).data.numpy()
             if buffer_index == sent_length:
+              if given_actions is not None:
+                assert action == data_utils._RA 
               direc = data_utils._DRA
             else:
-              direc = int(np.round(direction_sigmoid_np)[0])
-            if direc == data_utils._DLA:
-              action = data_utils._LA
-            else:
-              action = data_utils._RA
-            direction_logits.append(direction_logit)
+              if given_actions is not None:
+                if action == data_utils._LA:
+                  direc = data_utils._DLA  
+                else:
+                  direc = data_utils._DRA
+              else:
+                direc = int(np.round(direction_sigmoid_np)[0])
+                if direc == data_utils._DLA:
+                  action = data_utils._LA
+                else:
+                  action = data_utils._RA
+              direction_logits.append(direction_logit)
           else:
-            action = data_utils._SH
+            if given_actions is not None:
+              assert action == data_utils._SH
+            else:
+              action = data_utils._SH
             direction_logits.append(None)
         else:
           transition_logit = self.transition_model(features)
           transition_logit_np = transition_logit.type(torch.FloatTensor).data.numpy()
           if buffer_index == sent_length:
-            action = data_utils._RA
-          else:
+            if given_actions is not None:
+              assert action == data_utils._RA
+            else:
+              action = data_utils._RA
+          elif given_actions is None:
             action = int(transition_logit_np.argmax(axis=1)[0])
         
         if self.relation_model is not None and action != data_utils._SH:
@@ -373,9 +290,10 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
 
       if self.word_model is not None:
         words.append(word)
-
-       
-      actions.append(action)
+      
+      num_actions += 1
+      if given_actions is None:
+        predicted_actions.append(action)
       transition_logits.append(transition_logit)
       if self.relation_model is not None:
         relation_logits.append(relation_logit)
@@ -400,6 +318,10 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
           conll[child.id].pred_parent_id = stack.roots[-1].id
         if self.relation_model is not None:
           conll[child.id].pred_relation_ind = label
+    if given_actions is not None:
+      actions = given_actions
+    else:
+      actions = predicted_actions
 
     return conll, transition_logits, direction_logits, actions, relation_logits, labels, gen_word_logits, words
    

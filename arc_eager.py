@@ -33,7 +33,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
       decompose_actions, batch_size, use_cuda, model_path='', load_model=False):
     assert not decompose_actions and not more_context
     num_transitions = 3
-    num_features = 2
+    num_features = 3 # now including headed feature
     super(ArcEagerTransitionSystem, self).__init__(vocab_size, num_relations,
         num_features, num_transitions, embedding_size, hidden_size, 
         num_layers, dropout, init_weight_range, bidirectional,
@@ -41,6 +41,20 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
         batch_size, use_cuda, model_path, load_model)
     self.more_context = False
     self.generate_actions = [data_utils._SH, data_utils._RA]
+
+    # TODO store and load
+    # embed binary features
+    self.embed_headed = nn.Embedding(2, feature_size)
+    self.embed_shift = nn.Embedding(2, feature_size)
+    self.init_weights(init_weight_range)
+     
+    if use_cuda:
+      self.embed_headed.cuda()
+      self.embed_shift.cuda()
+
+  def init_weights(self, initrange=0.1):
+    self.embed_headed.weight.data.uniform_(-initrange, initrange)
+    self.embed_shift.weight.data.uniform_(-initrange, initrange)
 
   def map_transitions(self, actions):
     nactions = []
@@ -74,17 +88,16 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
    
     return stackops, arcops
 
-
-  def greedy_decode(self, conll, encoder_features):
+  def greedy_decode(self, conll, encoder_features, given_actions=None):
     stack = data_utils.ParseForest([])
     stack_has_parent = []
     stack_parent_relation = []
     buf = data_utils.ParseForest([conll[0]])
     buffer_index = 0
     sent_length = len(conll)
-    #print(sent_length)
 
-    actions = []
+    num_actions = 0
+    predicted_actions = []
     labels = []
     words = []
     transition_logits = []
@@ -97,35 +110,58 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
       transition_logit = None
       relation_logit = None
 
-      action = data_utils._SH
+      if given_actions is not None:
+        assert len(given_actions) > num_actions
+        action = given_actions[num_actions]
+      else:
+        action = data_utils._SH
       pred_action = data_utils._ESH
+
       label = -1
       s0 = stack.roots[-1].id if len(stack) > 0 else 0
 
       position = nn_utils.extract_feature_positions(buffer_index, s0)
-      features = nn_utils.select_features(encoder_features, position, self.use_cuda)
+      encoded_features = nn_utils.select_features(encoder_features, position, self.use_cuda)
+      head_ind = torch.LongTensor([1 if stack_has_parent and stack_has_parent[-1] else 0]).view(1, 1)
+      head_feat = self.embed_headed(nn_utils.to_var(head_ind, self.use_cuda)) 
+      features = torch.cat((encoded_features, head_feat), 0)
 
       if len(stack) > 0: # allowed to ra or la
         transition_logit = self.transition_model(features)
         transition_logit_np = transition_logit.type(torch.FloatTensor).data.numpy()
+
         if buffer_index == sent_length:
+          if given_actions is not None:
+            assert action == data_utils._RE or action == data_utils._LA
           pred_action = data_utils._ERE
         else:
-          #if stack_has_parent[-1]:
-          #  transition_logit_np[0, data_utils._LA] = -np.inf
-          #else:
-          #  transition_logit_np[0, data_utils._RE] = -np.inf
-          pred_action = int(transition_logit_np.argmax(axis=1)[0])
+          if given_actions is not None:
+            if action == data_utils._SH:
+              pred_action = data_utils._ESH
+            elif action == data_utils._RA:
+              pred_action = data_utils._ERA
+            else:
+              pred_action = data_utils._ERE
+          else:  
+            pred_action = int(transition_logit_np.argmax(axis=1)[0])
           transition_logits.append(transition_logit)
 
-        if pred_action == data_utils._ESH:
-          action = data_utils._SH
-        elif pred_action == data_utils._ERA:
-          action = data_utils._RA
-        elif stack_has_parent[-1] or buffer_index == sent_length:
-          action = data_utils._RE
-        else:
-          action = data_utils._LA
+        if given_actions is not None:
+          if pred_action == data_utils._ERE:
+            if stack_has_parent[-1] or buffer_index == sent_length:
+              # TODO check if this will hold in practice
+              assert action == data_utils._RE
+            else:
+              assert action == data_utils._LA
+        else:      
+          if pred_action == data_utils._ESH:
+            action = data_utils._SH
+          elif pred_action == data_utils._ERA:
+            action = data_utils._RA
+          elif stack_has_parent[-1] or buffer_index == sent_length:
+            action = data_utils._RE
+          else:
+            action = data_utils._LA
 
         if (self.relation_model is not None
             and (action == data_utils._LA or action == data_utils._RA
@@ -150,7 +186,8 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
         words.append(word)
 
       transition_logits.append(transition_logit)
-      actions.append(pred_action) 
+      num_actions += 1
+      predicted_actions.append(pred_action) 
       if self.relation_model is not None:
         relation_logits.append(relation_logit)
         labels.append(label)
@@ -159,8 +196,6 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
       if action == data_utils._SH or action == data_utils._RA:
         child = buf.roots[0]
         if action == data_utils._RA:
-          # this duplication might cause a problem
-          #stack.roots[-1].children.append(child) 
           stack_has_parent.append(True)
         else:
           stack_has_parent.append(False)
@@ -187,9 +222,89 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
           conll[child.id].pred_parent_id = buf.roots[0].id
           if self.relation_model is not None:
             conll[child.id].pred_relation_ind = label
-    #print(actions)
-    return conll, transition_logits, None, actions, relation_logits, labels, gen_word_logits, words
-   
+
+    return conll, transition_logits, None, predicted_actions, relation_logits, labels, gen_word_logits, words
+ 
+  def inside_score(self, conll, encoder_features):
+    assert self.word_model is not None
+    sent_length = len(conll) # includes root, but not eos
+    eps = np.exp(-10) # used to avoid division by 0
+
+    # compute all sh/re and word probabilities
+    seq_length = sent_length + 1
+    shift_log_probs = np.zeros([seq_length, seq_length, 2])
+    ra_log_probs = np.zeros([seq_length, seq_length, 2])
+    re_log_probs = np.zeros([seq_length, seq_length, 2])
+
+    word_log_probs = np.empty([sent_length, sent_length])
+    word_log_probs.fill(-np.inf)
+
+    # batch feature computation
+    enc_features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+        self.use_cuda)
+    num_items = enc_features.size()[0]
+
+    # dim [num_items, 2 (headedness), batch_size, num_features, feature_size]
+    enc_features.view(num_items, 1, 2, 1, self.feature_size).expand(
+        num_items, 2, 2, 1, self.feature_size)
+
+    # expand to add headedness feature
+    head_ind0 = torch.LongTensor(num_items, 1, 1, 1).fill_(0)
+    head_ind1 = torch.LongTensor(num_items, 1, 1, 1).fill_(1)
+            
+    head_feat0 = self.embed_headed(nn_utils.to_var(head_ind0, self.use_cuda)) 
+    head_feat1 = self.embed_headed(nn_utils.to_var(head_ind1, self.use_cuda)) 
+    head_features = torch.cat((head_feat0, head_feat1), 1)
+    features = torch.cat((encoded_features, head_features), 3)
+
+    tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
+        self.transition_model(features))).view(-1, 2, self.num_transitions)
+    word_dist = self.log_normalize(self.word_model(features))
+
+    counter = 0 
+    for i in range(seq_length-1):
+      for j in range(i+1, seq_length):
+        for c in range(2):
+          shift_log_probs[i, j, c] = tr_log_probs_list[counter, c, data_utils._ESH]
+          re_log_probs[i, j, c] = np.logaddexp(
+              tr_log_probs_list[counter, c, data_utils._LA], 
+              tr_log_probs_list[counter, c, data_utils._RA])
+          if j < sent_length:
+            if j < sent_length - 1:
+              word_id = conll[j+1].word_id 
+            else:
+              word_id = data_utils._EOS
+            word_log_probs[i, j] = nn_utils.to_numpy(word_dist[counter, word_id])
+        counter += 1
+
+    table_size = sent_length + 1
+    table = np.empty([table_size, table_size, table_size])
+    table.fill(-np.inf) # log probabilities
+
+    # first word prob 
+    init_features = nn_utils.select_features(encoder_features, [0, 0, 0], self.use_cuda)
+    word_dist = self.log_normalize(self.word_model(init_features).view(-1))
+    table[0, 0, 1] = nn_utils.to_numpy(word_dist[conll[1].word_id])
+
+    for j in range(2, sent_length+1):
+      for i in range(j-1):
+        score = shift_log_probs[i, j-1]
+        score += word_log_probs[i, j-1]
+        table[i, j-1, j] = score
+      for i in range(j-2, -1, -1):
+        for l in range(max(i, 1)): # l=0 if i=0
+          block_score = -np.inf
+          for k in range(i+1, j):
+            item_score = table[l, i, k] + table[i, k, j] 
+            if self.decompose_actions:
+              item_score += np.log(reduce_probs[k, j] + eps)
+            else:
+              item_score += re_log_probs[k, j]
+            block_score = np.logaddexp(block_score, item_score)
+          table[l, i, j] = block_score
+    return table[0, 0, sent_length]
+
+
 
   def oracle(self, conll, encoder_features):
     # Training oracle for single parsed sentence.
@@ -244,7 +359,13 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
             action = data_utils._RE 
 
       position = nn_utils.extract_feature_positions(buffer_index, s0) 
-      feature = nn_utils.select_features(encoder_features, position, self.use_cuda)
+      encoded_feature = nn_utils.select_features(encoder_features, position, self.use_cuda)
+     
+      head_ind = torch.LongTensor([1 if stack_has_parent and stack_has_parent[-1] else 0]).view(1, 1)
+      head_feat = self.embed_headed(nn_utils.to_var(head_ind, self.use_cuda)) 
+      feature = torch.cat((encoded_feature, head_feat), 0)
+      #TODO also add shift binary feature
+
       features.append(feature)
       
       if action == data_utils._LA:

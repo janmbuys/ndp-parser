@@ -63,8 +63,7 @@ class DPStack(nn.Module):
         table[i][j][j+1] = (torch.log1p(-re_probs_list[index]) 
                             + word_distr_list[index, word_ids[j+1]])
  
-    for gap in range(2, sent_length+1): #TODO this is not the old one
-      #print(gap)
+    for gap in range(2, sent_length+1):
       for i in range(sent_length+1-gap):
         j = i + gap
         for l in range(max(i, 1)):
@@ -73,9 +72,7 @@ class DPStack(nn.Module):
           for k in range(i+1, j):
             re_score = torch.log(re_probs_list[get_feature_index(k, j)])
             t_score = table[l][i][k] + table[i][k][j] + re_score
-            #score = score + t_score if score is not None else t_score
             block_scores.append(t_score)
-          #table[l][i][j] = score
           table[l][i][j] = nn_utils.log_sum_exp_1d(torch.cat(block_scores).view(1, -1))
     return table[0][0][sent_length]
 
@@ -97,11 +94,8 @@ class DPStack(nn.Module):
       return int((2*seq_length-i-1)*(i/2) + j-i-1)
 
     table_size = len(word_ids)
-    table_ts = torch.FloatTensor(table_size, table_size, table_size).fill_(-np.inf)
-    if self.use_cuda:
-      table = Variable(table_ts).cuda()
-    else:
-      table = Variable(table_ts)
+    table = nn_utils.to_var(torch.FloatTensor(table_size, table_size, 
+        table_size).fill_(-np.inf), self.use_cuda)
 
     # word probs
     table[0, 0, 1] = init_word_distr[word_ids[1]]
@@ -139,18 +133,15 @@ class DPStack(nn.Module):
 
     #print(encoder_features)
     # dim [num_pairs, batch_size, 2, state_size]
-    features = nn_utils.new_batch_feature_selection(encoder_features, seq_length,
+    features = nn_utils.batch_feature_selection(encoder_features, seq_length,
         self.use_cuda)
     #print(features)
     num_pairs = features.size()[0]
 
     # dim [num_pairs*batch_size, output_size] -> break dim
     re_probs_list = self.binary_normalize(self.transition_model(features)).view(num_pairs, batch_size)
-    eps_ts = torch.FloatTensor(num_pairs, batch_size).fill_(np.exp(-10))
-    if self.use_cuda:
-      eps = Variable(eps_ts).cuda()
-    else:
-      eps = Variable(eps_ts)
+    eps = nn_utils.to_var(torch.FloatTensor(num_pairs, batch_size).fill_(
+        np.exp(-10)), self.use_cuda)
     re_log_probs_list = torch.log(re_probs_list+eps)
     sh_log_probs_list = torch.log1p(-re_probs_list+eps)
 
@@ -176,11 +167,8 @@ class DPStack(nn.Module):
       return rev_inds_table[i, j]
 
     table_size = sentence.size()[0]
-    table_ts = torch.FloatTensor(table_size, table_size, table_size, batch_size).fill_(-np.inf)
-    if self.use_cuda:
-      table = Variable(table_ts).cuda()
-    else:
-      table = Variable(table_ts)
+    table = nn_utils.to_var(torch.FloatTensor(table_size, table_size, 
+        table_size, batch_size).fill_(-np.inf), self.use_cuda)
 
     # word probs
     table[0, 0, 1] = torch.gather(init_word_distr, 1, sentence[1].view(-1, 1))
@@ -188,11 +176,8 @@ class DPStack(nn.Module):
       start_index = get_feature_index(i, i+1)
       end_index = get_feature_index(i, sent_length-1) + 1
       
-      word_probs_ts = torch.FloatTensor(sent_length - (i + 1), batch_size).fill_(-np.inf)
-      if self.use_cuda:
-        word_probs = Variable(word_probs_ts).cuda()
-      else:
-        word_probs = Variable(word_probs_ts)
+      word_probs = nn_utils.to_var(torch.FloatTensor(sent_length - (i + 1),
+          batch_size).fill_(-np.inf), self.use_cuda)
 
       for j in range(i+1, sent_length):
         index = get_feature_index(i, j)
@@ -201,19 +186,12 @@ class DPStack(nn.Module):
       sh_probs = sh_log_probs_list[start_index:end_index] + word_probs
 
       # Cannot do scatter asign to table directly
-      word_table_ts = torch.FloatTensor(sent_length - (i+1), sent_length - i,
-          batch_size).fill_(-np.inf) 
-      if self.use_cuda:
-        word_table = Variable(word_table_ts).cuda()
-      else:
-        word_table = Variable(word_table_ts)
+      word_table = nn_utils.to_var(torch.FloatTensor(sent_length - (i+1), 
+          sent_length - i, batch_size).fill_(-np.inf), self.use_cuda)
 
       # Indexing for scatter asignment.
-      range_ts = torch.LongTensor(range(1, sent_length-i)).view(-1, 1).repeat(1, batch_size)
-      if self.use_cuda:
-        range_var = Variable(range_ts).cuda()
-      else:
-        range_var = Variable(range_ts)
+      range_var = nn_utils.to_var(torch.LongTensor(range(1, 
+          sent_length-i)).view(-1, 1).repeat(1, batch_size), self.use_cuda)
       
       word_table.scatter_(1, range_var.view(-1, 1, batch_size), 
           sh_probs.view(-1, 1, batch_size))
@@ -233,42 +211,6 @@ class DPStack(nn.Module):
         table[0:max(i, 1), i, j] = nn_utils.log_sum_exp(all_block_scores, 1)
           
     return table[0, 0, sent_length]
-
-
-  def _inside_algorithm_recusive(self,encoder_features, word_ids): 
-    sent_length = len(word_ids) - 1
-    seq_length = len(word_ids)
-
-    features = nn_utils.batch_feature_selection(encoder_features, seq_length,
-        self.use_cuda)
-    re_probs_list = self.binary_normalize(self.transition_model(features))
-    word_distr_list = self.log_normalize(self.word_model(features))
-
-    init_features = nn_utils.select_features(encoder_features, [0, 0], 
-                                             self.use_cuda)
-    init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
-
-    # do simple arithmetic to access distribution list entries
-    def get_feature_index(i, j):
-      return int((2*seq_length-i-1)*(i/2) + j-i-1)
-
-    def inside_op(l, i, j):
-      if l == 0 and i == 0 and j == 1:
-        return init_word_distr[word_ids[1]]
-      if i == j - 1: # word emmision
-        index = get_feature_index(l, i)
-        return (torch.log1p(-re_probs_list[index, 0]) 
-                + word_distr_list[index, word_ids[j]])
-      else:
-        block_scores = []
-        for k in range(i+1, j):
-          score = (inside_op(l, i, k) + inside_op(i, k, j) +   
-                   torch.log(re_probs_list[get_feature_index(k, j), 0]))
-          block_scores.append(score) #TODO rather add one at a time
-        return nn_utils.log_sum_exp_1d(torch.cat(block_scores).view(1, -1))
-
-    return inside_op(0, 0, sent_length)
-
 
   def _decode_action_sequence(self, encoder_features, word_ids, actions):
     """Execute a given action sequence, also find best relations."""

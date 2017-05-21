@@ -324,7 +324,7 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
     print('-' * 89)
     print('decoding time: {:5.2f}s'.format(time.time() - decode_start_time))
 
-    if args.generative:
+    if args.generative and not args.arc_eager: #TODO implement AE inside score
       # score the model 
       decode_start_time = time.time()
       total_loss, total_length, total_length_more = training_score(args,

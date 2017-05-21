@@ -5,6 +5,12 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 
+def to_var(ts, use_cuda):
+  if use_cuda:
+    return Variable(ts).cuda()
+  else:
+    return Variable(ts)
+
 def clip_grad_norm(parameters, max_norm, norm_type=2):
     """Clips gradient norm of an iterable of parameters.
     The norm is computed over all gradients together, as if they were
@@ -65,7 +71,7 @@ def select_features(input_features, indexes, use_cuda=False):
   
   return torch.index_select(input_features, 0, positions)
 
-def new_batch_feature_selection(input_features, seq_length, use_cuda=False,
+def batch_feature_selection(input_features, seq_length, use_cuda=False,
     rev=False):
   left_indexes = [] 
   right_indexes = [] 
@@ -89,14 +95,12 @@ def new_batch_feature_selection(input_features, seq_length, use_cuda=False,
 
   left_selected_features = torch.index_select(input_features, 0,
       left_positions).view(-1, input_features.size(1), 1, input_features.size(2))
-  #print(left_selected_features)
   right_selected_features = torch.index_select(input_features, 0, 
       right_positions).view(-1, input_features.size(1), 1, input_features.size(2))
-  #print(right_selected_features)
 
   return torch.cat((left_selected_features, right_selected_features), 2)
 
-def batch_feature_selection(input_features, seq_length, use_cuda=False,
+def old_batch_feature_selection(input_features, seq_length, use_cuda=False,
     rev=False):
   indexes = [] 
   if rev:
