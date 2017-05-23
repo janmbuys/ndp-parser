@@ -350,7 +350,7 @@ def read_conll(fh, projectify, replicate_rnng=False):
   if len(tokens) > 1:
     yield tokens
 
-  print('%d dropped non-projective sentences.' % dropped)
+  #print('%d dropped non-projective sentences.' % dropped)
   print('%d sentences read.' % read)
 
 def read_sentences_txt_given_fixed_vocab(txt_path, txt_name, working_path):

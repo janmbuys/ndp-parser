@@ -97,7 +97,7 @@ def batch_feature_selection(input_features, seq_length, use_cuda=False,
       left_positions).view(-1, input_features.size(1), 1, input_features.size(2))
   right_selected_features = torch.index_select(input_features, 0, 
       right_positions).view(-1, input_features.size(1), 1, input_features.size(2))
-
+  # dim seq_length, batch_size, 2, feat_size
   return torch.cat((left_selected_features, right_selected_features), 2)
 
 def old_batch_feature_selection(input_features, seq_length, use_cuda=False,

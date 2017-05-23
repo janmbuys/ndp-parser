@@ -42,15 +42,21 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     self.more_context = False
     self.generate_actions = [data_utils._SH, data_utils._RA]
 
-    # TODO store and load
-    # embed binary features
-    self.embed_headed = nn.Embedding(2, feature_size)
-    self.embed_shift = nn.Embedding(2, feature_size)
-    self.init_weights(init_weight_range)
+    if load_model:
+      assert model_path != ''
+      model_fn = model_path + '_headembed.pt'
+      with open(model_fn, 'rb') as f:
+        self.embed_headed = torch.load(f)
+    else:  
+      # embed binary features
+      self.embed_headed = nn.Embedding(2, self.feature_size)
+      self.embed_shift = nn.Embedding(2, self.feature_size) #TODO
+      self.init_weights(init_weight_range)
      
     if use_cuda:
       self.embed_headed.cuda()
-      self.embed_shift.cuda()
+      if not load_model: #TODO
+        self.embed_shift.cuda()
 
   def init_weights(self, initrange=0.1):
     self.embed_headed.weight.data.uniform_(-initrange, initrange)
@@ -224,7 +230,136 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
             conll[child.id].pred_relation_ind = label
 
     return conll, transition_logits, None, predicted_actions, relation_logits, labels, gen_word_logits, words
- 
+
+
+  def viterbi_decode(self, conll, encoder_features):
+    sent_length = len(conll) # includes root, but not eos
+    eps = np.exp(-10) # used to avoid division by 0
+
+    # compute all sh/re and word probabilities
+    seq_length = sent_length + 1
+    shift_log_probs = np.zeros([seq_length, seq_length, 2])
+    ra_log_probs = np.zeros([seq_length, seq_length, 2])
+    re_log_probs = np.zeros([seq_length, seq_length, 2])
+    word_log_probs = np.empty([sent_length, sent_length, 2])
+    word_log_probs.fill(-np.inf)
+
+    # batch feature computation
+    enc_features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+        self.use_cuda)
+    num_items = enc_features.size()[0]
+
+    # dim [num_items, 2 (headedness), batch_size, num_features, feature_size]
+    encoded_features = enc_features.view(num_items, 1, 1, 2, self.feature_size).expand(
+        num_items, 2, 1, 2, self.feature_size)
+
+    # expand to add headedness feature
+    head_ind0 = torch.LongTensor(num_items).fill_(0)
+    head_ind1 = torch.LongTensor(num_items).fill_(1)
+            
+    head_feat0 = self.embed_headed(nn_utils.to_var(head_ind0, self.use_cuda)) 
+    head_feat1 = self.embed_headed(nn_utils.to_var(head_ind1, self.use_cuda)) 
+    head_features = torch.cat((head_feat0.view(num_items, 1, 1, 1, -1), 
+                               head_feat1.view(num_items, 1, 1, 1, -1)),
+                              1)
+    features = torch.cat((encoded_features, head_features), 3)
+
+    tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
+        self.transition_model(features)).view(num_items, 2, self.num_transitions))
+    if self.word_model is not None:
+      word_dist = self.log_normalize(self.word_model(features)).view(
+          num_items, 2, self.vocab_size)
+
+    counter = 0 
+    for i in range(seq_length-1):
+      for j in range(i+1, seq_length):
+        for c in range(2):
+          shift_log_probs[i, j, c] = tr_log_probs_list[counter, c, data_utils._ESH]
+          ra_log_probs[i, j, c] = tr_log_probs_list[counter, c, data_utils._ERA]
+          re_log_probs[i, j, c] = tr_log_probs_list[counter, c, data_utils._ERE]
+          if self.word_model is not None and j < sent_length:
+            if j < sent_length - 1:
+              word_id = conll[j+1].word_id 
+            else:
+              word_id = data_utils._EOS
+            word_log_probs[i, j, c] = nn_utils.to_numpy(word_dist[counter, c, word_id])
+        counter += 1
+
+    table_size = sent_length + 1
+    table = np.empty([table_size, 2, table_size, 2, table_size])
+    table.fill(-np.inf) # log probabilities
+
+    split_indexes = np.zeros((table_size, table_size, table_size), 
+                             dtype=np.int)
+    headedness = np.zeros((table_size, 2, table_size, 2, table_size), 
+                          dtype=np.int)
+    headedness.fill(0) # default
+    
+    # first word prob 
+    if self.word_model is not None:
+      init_features = nn_utils.select_features(encoder_features, [0, 0, 0], self.use_cuda)
+      init_word_dist = self.log_normalize(self.word_model(init_features).view(-1))
+      table[0, 0, 0, 0, 1] = nn_utils.to_numpy(init_word_dist[conll[1].word_id])
+    
+    # word probs
+    for i in range(sent_length-1):
+      for j in range(i+1, sent_length):
+        for c in range(2):
+          table[i, c, j, 0, j+1] = shift_log_probs[i, j, c] 
+          table[i, c, j, 1, j+1] = ra_log_probs[i, j, c] 
+          if self.word_model is not None:
+            table[i, c, j, 0, j+1] += word_log_probs[i, j, c]
+            table[i, c, j, 1, j+1] += word_log_probs[i, j, c]
+
+    for gap in range(2, sent_length+1):
+      for i in range(sent_length+1-gap):
+        j = i + gap
+        for c in range(2):
+          temp_right = []
+          temp_headed = []
+          for k in range(i+1, j):
+            score0 = table[i, c, k, 0, j] + re_log_probs[k, j, 0]
+            score1 = table[i, c, k, 1, j] + re_log_probs[k, j, 1]
+            if score0 > score1:
+              temp_right.append(score0)
+              temp_headed.append(0)
+            else:
+              temp_right.append(score1)
+              temp_headed.append(1)
+
+          for l in range(max(i, 1)):
+            for b in range(1 if i == 0 else 2):
+              block_scores = []
+              for k in range(i+1, j):
+                item_score = table[l, b, i, c, k] + temp_right[k - (i+1)]
+                block_scores.append(item_score)
+              ind = np.argmax(block_scores)
+              k = ind + i + 1
+              table[l, b, i, c, j] = block_scores[ind]
+              headedness[l, b, i, c, j] = temp_headed[ind]
+
+    def backtrack_path(l, b, i, c, j):
+      """ Find action sequence for best path. """
+      if i == j - 1:
+        if c == 0:
+          return [data_utils._SH]
+        else:
+          return [data_utils._RA]
+      else:
+        k = split_indexes[l, b, i, c, j]
+        headed = headedness[l, b, i, c, j]
+        act = data_utils._LA if headed == 0 else data_utils._RE
+        return (backtrack_path(l, b, i, c, k) 
+                + backtrack_path(i, c, k, headed, j) + [act])
+               # to remove spurious ambiguity: 
+               # if act=RE j-k > 1, ensure headed=true 
+               # (ie, not preceeded by LA)
+
+    actions = backtrack_path(0, 0, sent_length)
+    #print(table[0, 0, 0, 0, sent_length]) # scores should match
+    return self.greedy_decode(conll, encoder_features, actions)
+
+
   def inside_score(self, conll, encoder_features):
     assert self.word_model is not None
     sent_length = len(conll) # includes root, but not eos
@@ -235,8 +370,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     shift_log_probs = np.zeros([seq_length, seq_length, 2])
     ra_log_probs = np.zeros([seq_length, seq_length, 2])
     re_log_probs = np.zeros([seq_length, seq_length, 2])
-
-    word_log_probs = np.empty([sent_length, sent_length])
+    word_log_probs = np.empty([sent_length, sent_length, 2])
     word_log_probs.fill(-np.inf)
 
     # batch feature computation
@@ -245,64 +379,76 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     num_items = enc_features.size()[0]
 
     # dim [num_items, 2 (headedness), batch_size, num_features, feature_size]
-    enc_features.view(num_items, 1, 2, 1, self.feature_size).expand(
-        num_items, 2, 2, 1, self.feature_size)
+    encoded_features = enc_features.view(num_items, 1, 1, 2, self.feature_size).expand(
+        num_items, 2, 1, 2, self.feature_size)
 
     # expand to add headedness feature
-    head_ind0 = torch.LongTensor(num_items, 1, 1, 1).fill_(0)
-    head_ind1 = torch.LongTensor(num_items, 1, 1, 1).fill_(1)
+    head_ind0 = torch.LongTensor(num_items).fill_(0)
+    head_ind1 = torch.LongTensor(num_items).fill_(1)
             
     head_feat0 = self.embed_headed(nn_utils.to_var(head_ind0, self.use_cuda)) 
     head_feat1 = self.embed_headed(nn_utils.to_var(head_ind1, self.use_cuda)) 
-    head_features = torch.cat((head_feat0, head_feat1), 1)
+    head_features = torch.cat((head_feat0.view(num_items, 1, 1, 1, -1), 
+                               head_feat1.view(num_items, 1, 1, 1, -1)),
+                              1)
     features = torch.cat((encoded_features, head_features), 3)
 
     tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
-        self.transition_model(features))).view(-1, 2, self.num_transitions)
-    word_dist = self.log_normalize(self.word_model(features))
+        self.transition_model(features)).view(num_items, 2, self.num_transitions))
+    word_dist = self.log_normalize(self.word_model(features)).view(
+            num_items, 2, self.vocab_size)
 
     counter = 0 
     for i in range(seq_length-1):
       for j in range(i+1, seq_length):
         for c in range(2):
           shift_log_probs[i, j, c] = tr_log_probs_list[counter, c, data_utils._ESH]
-          re_log_probs[i, j, c] = np.logaddexp(
-              tr_log_probs_list[counter, c, data_utils._LA], 
-              tr_log_probs_list[counter, c, data_utils._RA])
+          ra_log_probs[i, j, c] = tr_log_probs_list[counter, c, data_utils._ERA]
+          re_log_probs[i, j, c] = tr_log_probs_list[counter, c, data_utils._ERE]
           if j < sent_length:
             if j < sent_length - 1:
               word_id = conll[j+1].word_id 
             else:
               word_id = data_utils._EOS
-            word_log_probs[i, j] = nn_utils.to_numpy(word_dist[counter, word_id])
+            word_log_probs[i, j, c] = nn_utils.to_numpy(word_dist[counter, c, word_id])
         counter += 1
 
     table_size = sent_length + 1
-    table = np.empty([table_size, table_size, table_size])
+    table = np.empty([table_size, 2, table_size, 2, table_size])
     table.fill(-np.inf) # log probabilities
 
-    # first word prob 
     init_features = nn_utils.select_features(encoder_features, [0, 0, 0], self.use_cuda)
-    word_dist = self.log_normalize(self.word_model(init_features).view(-1))
-    table[0, 0, 1] = nn_utils.to_numpy(word_dist[conll[1].word_id])
+    init_word_dist = self.log_normalize(self.word_model(init_features).view(-1))
+    
+    # word probs
+    table[0, 0, 0, 0, 1] = nn_utils.to_numpy(init_word_dist[conll[1].word_id])
+    for i in range(sent_length-1):
+      for j in range(i+1, sent_length):
+        for c in range(2):
+          table[i, c, j, 0, j+1] = (shift_log_probs[i, j, c] 
+                                    + word_log_probs[i, j, c])
+          table[i, c, j, 1, j+1] = (ra_log_probs[i, j, c] 
+                                    + word_log_probs[i, j, c])
 
-    for j in range(2, sent_length+1):
-      for i in range(j-1):
-        score = shift_log_probs[i, j-1]
-        score += word_log_probs[i, j-1]
-        table[i, j-1, j] = score
-      for i in range(j-2, -1, -1):
-        for l in range(max(i, 1)): # l=0 if i=0
-          block_score = -np.inf
+    for gap in range(2, sent_length+1):
+      for i in range(sent_length+1-gap):
+        j = i + gap
+        for c in range(1 if i == 0 else 2):
+          temp_right = []
           for k in range(i+1, j):
-            item_score = table[l, i, k] + table[i, k, j] 
-            if self.decompose_actions:
-              item_score += np.log(reduce_probs[k, j] + eps)
-            else:
-              item_score += re_log_probs[k, j]
-            block_score = np.logaddexp(block_score, item_score)
-          table[l, i, j] = block_score
-    return table[0, 0, sent_length]
+            score0 = table[i, c, k, 0, j] + re_log_probs[k, j, 0]
+            score1 = table[i, c, k, 1, j] + re_log_probs[k, j, 1]
+            temp_right.append(np.logaddexp(score0, score1))
+
+          for l in range(max(i, 1)):
+            for b in range(1 if i == 0 else 2):
+              block_score = -np.inf
+              for k in range(i+1, j):
+                item_score = table[l, b, i, c, k] + temp_right[k - (i+1)]
+                block_score = np.logaddexp(block_score, item_score)
+
+              table[l, b, i, c, j] = block_score
+    return table[0, 0, 0, 0, sent_length] 
 
 
 

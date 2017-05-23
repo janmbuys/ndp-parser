@@ -34,6 +34,7 @@ class TransitionSystem():
     self.vocab_size = vocab_size
     self.decompose_actions = decompose_actions
     self.num_features = num_features
+    self.num_relations = num_relations
     self.num_transitions = num_transitions
     self.log_normalize = nn.LogSoftmax()
     self.binary_normalize = nn.Sigmoid()
