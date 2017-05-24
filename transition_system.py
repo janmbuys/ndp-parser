@@ -53,14 +53,20 @@ class TransitionSystem():
         model_fn = model_path + '_relation.pt'
         with open(model_fn, 'rb') as f:
           self.relation_model = torch.load(f)
+      else:
+        self.relation_model = None
       if generative:
         model_fn = model_path + '_word.pt'
         with open(model_fn, 'rb') as f:
           self.word_model = torch.load(f)
+      else:
+        self.word_model = None
       if decompose_actions:
         model_fn = model_path + '_direction.pt'
         with open(model_fn, 'rb') as f:
           self.direction_model = torch.load(f)
+      else:
+        self.direction_model = None
 
     else: 
       self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, 

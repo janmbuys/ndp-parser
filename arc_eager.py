@@ -154,9 +154,11 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
 
         if given_actions is not None:
           if pred_action == data_utils._ERE:
-            if stack_has_parent[-1] or buffer_index == sent_length:
-              # TODO check if this will hold in practice
+            if stack_has_parent[-1]:
               assert action == data_utils._RE
+            elif buffer_index == sent_length:
+              # TODO not always _RE for decoding
+              assert action == data_utils._RE or action == data_utils._LA
             else:
               assert action == data_utils._LA
         else:      
@@ -289,7 +291,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     table = np.empty([table_size, 2, table_size, 2, table_size])
     table.fill(-np.inf) # log probabilities
 
-    split_indexes = np.zeros((table_size, table_size, table_size), 
+    split_indexes = np.zeros((table_size, 2, table_size, 2, table_size), 
                              dtype=np.int)
     headedness = np.zeros((table_size, 2, table_size, 2, table_size), 
                           dtype=np.int)
@@ -300,6 +302,8 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
       init_features = nn_utils.select_features(encoder_features, [0, 0, 0], self.use_cuda)
       init_word_dist = self.log_normalize(self.word_model(init_features).view(-1))
       table[0, 0, 0, 0, 1] = nn_utils.to_numpy(init_word_dist[conll[1].word_id])
+    else:
+      table[0, 0, 0, 0, 1] = 0
     
     # word probs
     for i in range(sent_length-1):
@@ -336,6 +340,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
               ind = np.argmax(block_scores)
               k = ind + i + 1
               table[l, b, i, c, j] = block_scores[ind]
+              split_indexes[l, b, i, c, j] = k
               headedness[l, b, i, c, j] = temp_headed[ind]
 
     def backtrack_path(l, b, i, c, j):
@@ -347,6 +352,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
           return [data_utils._RA]
       else:
         k = split_indexes[l, b, i, c, j]
+        assert k > i and k < j, str(i) + ' ' + str(k) + ' ' + str(j)
         headed = headedness[l, b, i, c, j]
         act = data_utils._LA if headed == 0 else data_utils._RE
         return (backtrack_path(l, b, i, c, k) 
@@ -355,7 +361,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
                # if act=RE j-k > 1, ensure headed=true 
                # (ie, not preceeded by LA)
 
-    actions = backtrack_path(0, 0, sent_length)
+    actions = backtrack_path(0, 0, 0, 0, sent_length)
     #print(table[0, 0, 0, 0, sent_length]) # scores should match
     return self.greedy_decode(conll, encoder_features, actions)
 
