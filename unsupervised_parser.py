@@ -2,31 +2,19 @@
 # Code credit: BIST parser; pytorch example word_language_model; 
 #              pytorch master source; pytorch CRF example 
 
-import argparse
 import math
-import os
 import random
-import sys
 import time
-
-from collections import defaultdict
-from pathlib import Path
-
-import numpy as np
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.autograd import Variable
 
-import rnn_encoder
-import classifier
-import binary_classifier
-import dp_stack
 import data_utils
 import nn_utils
+import shift_reduce_dp
 
-def train_decode(val_sentences, stack_model, word_vocab, output_fn, max_sents=-1, use_cuda=False):
+def training_decode(val_sentences, stack_model, word_vocab, output_fn, max_sents=-1, use_cuda=False):
   stack_model.eval()
   decode_start_time = time.time()
   with open(output_fn, 'w') as fh:
@@ -51,8 +39,7 @@ def train_decode(val_sentences, stack_model, word_vocab, output_fn, max_sents=-1
   print('decode time {:2.2f}s'.format(time.time() - decode_start_time))
  
 
-
-def train_unsup(args, sentences, dev_sentences, test_sentences, word_vocab):
+def train(args, sentences, dev_sentences, word_vocab):
   vocab_size = len(word_vocab)
   num_features = 2
   batch_size = args.batch_size
@@ -60,7 +47,7 @@ def train_unsup(args, sentences, dev_sentences, test_sentences, word_vocab):
   
   # Build the model
   feature_size = args.hidden_size
-  stack_model = dp_stack.DPStack(vocab_size, args.embedding_size,
+  stack_model = shift_reduce_dp.ShiftReduceDP(vocab_size, args.embedding_size,
       args.hidden_size, args.num_layers, args.dropout,
       args.init_weight_range, num_features, args.stack_next, args.cuda)
 
@@ -126,7 +113,7 @@ def train_unsup(args, sentences, dev_sentences, test_sentences, word_vocab):
 
       if batch_count % args.logging_interval == 0 and i > 0:
         if args.decode_at_checkpoints:
-          train_decode(dev_sentences, stack_model, word_vocab, (args.working_dir + '/'
+          training_decode(dev_sentences, stack_model, word_vocab, (args.working_dir + '/'
               + args.dev_name + '.' + str(epoch) + '.' + str(batch_count) 
               + '.shre'), -1, args.cuda)  #TODO 100
           stack_model.train()
@@ -178,7 +165,7 @@ def train_unsup(args, sentences, dev_sentences, test_sentences, word_vocab):
 
     print('-' * 89)
 
-    train_decode(dev_sentences, stack_model, word_vocab, args.working_dir + '/'
+    training_decode(dev_sentences, stack_model, word_vocab, args.working_dir + '/'
         + args.dev_name + '.' + str(epoch) + '.shre', use_cuda=args.cuda)
     
     # Anneal the learning rate.

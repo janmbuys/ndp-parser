@@ -1,10 +1,11 @@
 # Author: Jan Buys
 
+import numpy as np
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
-import numpy as np
 
 import classifier
 import binary_classifier
@@ -12,12 +13,12 @@ import rnn_encoder
 import nn_utils
 import data_utils
 
-class DPStack(nn.Module):
+class ShiftReduceDP(nn.Module):
   """Stack-based generative model with dynamic programming inference.""" 
 
   def __init__(self, vocab_size, embedding_size, hidden_size, num_layers,
                dropout, init_weight_range, num_features, stack_next, use_cuda):
-    super(DPStack, self).__init__()
+    super(ShiftReduceDP, self).__init__()
     self.use_cuda = use_cuda
     self.stack_next = stack_next
     self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, embedding_size, 
@@ -31,6 +32,7 @@ class DPStack(nn.Module):
 
     self.log_normalize = nn.LogSoftmax()
     self.binary_normalize = nn.Sigmoid()
+
 
   def _inside_algorithm_iterative_old(self, encoder_features, word_ids):
     sent_length = len(word_ids) - 1

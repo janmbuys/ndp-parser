@@ -2,28 +2,14 @@
 # Code credit: BIST parser; pytorch example word_language_model; 
 #              pytorch master source
 
-import argparse
-import math
-import os
-import random
-import sys
-import time
-
-from collections import defaultdict
-from pathlib import Path
-
 import numpy as np
 
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.autograd import Variable
 
 import rnn_encoder
 import classifier
 import binary_classifier
-import data_utils
-import nn_utils
 
 class TransitionSystem():
   def __init__(self, vocab_size, num_relations, num_features, num_transitions,
