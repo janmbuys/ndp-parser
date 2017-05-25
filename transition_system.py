@@ -29,10 +29,13 @@ class TransitionSystem():
   def __init__(self, vocab_size, num_relations, num_features, num_transitions,
       embedding_size, hidden_size, num_layers, dropout, init_weight_range, 
       bidirectional, predict_relations, generative, decompose_actions, 
-      batch_size, use_cuda, model_path='', load_model=False):
+      stack_next, batch_size, use_cuda, model_path, load_model):
     self.use_cuda = use_cuda
     self.vocab_size = vocab_size
     self.decompose_actions = decompose_actions
+    self.predict_relations = predict_relations
+    self.generative = generative
+    self.stack_next = stack_next
     self.num_features = num_features
     self.num_relations = num_relations
     self.num_transitions = num_transitions
@@ -105,6 +108,24 @@ class TransitionSystem():
       if decompose_actions:
         self.direction_model.cuda()
 
+  def store_model(self, path):
+    model_fn = path + '_encoder.pt'
+    with open(model_fn, 'wb') as f:
+      torch.save(self.encoder_model, f)
+    model_fn = path + '_transition.pt'
+    with open(model_fn, 'wb') as f:
+      torch.save(self.transition_model, f)
+    if self.predict_relations:
+      model_fn = path + '_relation.pt'
+      with open(model_fn, 'wb') as f:
+        torch.save(self.relation_model, f)
+    if self.generative:
+      model_fn = path + '_word.pt'
+      with open(model_fn, 'wb') as f:
+        torch.save(self.word_model, f)
+    if self.decompose_actions:
+      model_fn = path + '_direction.pt'
+      with open(model_fn, 'wb') as f:
+        torch.save(self.direction_model, f)
 
-
-
+ 

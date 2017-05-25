@@ -30,15 +30,16 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
   def __init__(self, vocab_size, num_relations, 
       embedding_size, hidden_size, num_layers, dropout, init_weight_range,
       bidirectional, more_context, predict_relations, generative, 
-      decompose_actions, batch_size, use_cuda, model_path='', load_model=False):
+      decompose_actions, stack_next, batch_size, use_cuda, model_path, 
+      load_model):
     assert not (more_context and decompose_actions)
     num_transitions = 3
     num_features = 4 if more_context else 2
     super(ArcHybridTransitionSystem, self).__init__(vocab_size, num_relations,
         num_features, num_transitions, embedding_size, hidden_size, 
         num_layers, dropout, init_weight_range, bidirectional, 
-        predict_relations, generative, decompose_actions, batch_size, use_cuda,
-        model_path, load_model)
+        predict_relations, generative, decompose_actions, stack_next, 
+        batch_size, use_cuda, model_path, load_model)
     self.more_context = more_context
     self.generate_actions = [data_utils._SH]
 
@@ -217,58 +218,49 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
 
       if len(stack) > 1: # allowed to ra or la
         #TODO rather score transition and relation jointly for greedy choice
-        if self.direction_model is not None:
+        if buffer_index == sent_length:
+          if given_actions is not None:
+            assert action == data_utils._RA
+          else:
+            action = data_utils._RA
+          if self.direction_model is not None:
+            direction_logits.append(None)
+        elif self.direction_model is not None:
           transition_logit = self.transition_model(features)
-          if buffer_index == sent_length:
-            if given_actions is not None:
-              assert action == data_utils._RA
-            sh_action = data_utils._SRE 
-          else: #TODO instead of sigmoid can just test > 0 if not scoring
-            transition_sigmoid = normalize(transition_logit)
-            transition_sigmoid_np = transition_sigmoid.type(torch.FloatTensor).data.numpy()
-            if given_actions is not None:
-              if action == data_utils._SH:
-                sh_action = data_utils._SSH
-              else:
-                sh_action = data_utils._SRE
-            else:    
-              sh_action = int(np.round(transition_sigmoid_np)[0])
+          #TODO instead of sigmoid can just test > 0 if not scoring
+          transition_sigmoid = normalize(transition_logit)
+          transition_sigmoid_np = transition_sigmoid.type(torch.FloatTensor).data.numpy()
+          if given_actions is not None:
+            if action == data_utils._SH:
+              sh_action = data_utils._SSH
+            else:
+              sh_action = data_utils._SRE
+          else:
+            sh_action = int(np.round(transition_sigmoid_np)[0])
           if sh_action == data_utils._SRE:
             direction_logit = self.direction_model(features)  
             direction_sigmoid = normalize(direction_logit)
             direction_sigmoid_np = direction_sigmoid.type(torch.FloatTensor).data.numpy()
-            if buffer_index == sent_length:
-              if given_actions is not None:
-                assert action == data_utils._RA 
-              direc = data_utils._DRA
-            else:
-              if given_actions is not None:
-                if action == data_utils._LA:
-                  direc = data_utils._DLA  
-                else:
-                  direc = data_utils._DRA
-              else:
-                direc = int(np.round(direction_sigmoid_np)[0])
-                if direc == data_utils._DLA:
-                  action = data_utils._LA
-                else:
-                  action = data_utils._RA
-              direction_logits.append(direction_logit)
-          else:
             if given_actions is not None:
-              assert action == data_utils._SH
+              if action == data_utils._LA:
+                direc = data_utils._DLA  
+              else:
+                direc = data_utils._DRA
             else:
+              direc = int(np.round(direction_sigmoid_np)[0])
+              if direc == data_utils._DLA:
+                action = data_utils._LA
+              else:
+                action = data_utils._RA
+            direction_logits.append(direction_logit)
+          else:
+            if given_actions is None:
               action = data_utils._SH
             direction_logits.append(None)
         else:
           transition_logit = self.transition_model(features)
           transition_logit_np = transition_logit.type(torch.FloatTensor).data.numpy()
-          if buffer_index == sent_length:
-            if given_actions is not None:
-              assert action == data_utils._RA
-            else:
-              action = data_utils._RA
-          elif given_actions is None:
+          if given_actions is None:
             action = int(transition_logit_np.argmax(axis=1)[0])
         
         if self.relation_model is not None and action != data_utils._SH:
@@ -301,6 +293,7 @@ class ArcHybridTransitionSystem(tr.TransitionSystem):
 
       # excecute action
       if action == data_utils._SH:
+        assert len(buf) == 1
         stack.roots.append(buf.roots[0]) 
         buffer_index += 1
         if buffer_index == sent_length:

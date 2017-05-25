@@ -72,19 +72,19 @@ def select_features(input_features, indexes, use_cuda=False):
   return torch.index_select(input_features, 0, positions)
 
 def batch_feature_selection(input_features, seq_length, use_cuda=False,
-    rev=False):
+    rev=False, stack_next=False):
   left_indexes = [] 
   right_indexes = [] 
   if rev:
     for j in range(1, seq_length):
       for i in range(j):
         left_indexes.append(i)
-        right_indexes.append(j)
+        right_indexes.append(j-1 if stack_next else j)
   else:
     for i in range(seq_length-1):
       for j in range(i+1, seq_length):
         left_indexes.append(i)
-        right_indexes.append(j)
+        right_indexes.append(j-1 if stack_next else j)
 
   if use_cuda:
     left_positions = Variable(torch.LongTensor(left_indexes)).cuda()
@@ -121,10 +121,13 @@ def old_batch_feature_selection(input_features, seq_length, use_cuda=False,
   return selected_features.view(-1, 2, input_features.size(1), input_features.size(2))
 
 
-def extract_feature_positions(b, s0, s1=None, s2=None, more_context=False):
+def extract_feature_positions(b, s0, s1=None, s2=None, more_context=False,
+  stack_next=False):
   # Ensure feature extraction is consistent
   if more_context and s1 is not None and s2 is not None:
     return [s2, s1, s0, b]
+  elif stack_next:
+    return [s0, max(0, b-1)]
   else:
     return [s0, b]
 

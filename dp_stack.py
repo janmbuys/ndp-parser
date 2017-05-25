@@ -16,9 +16,10 @@ class DPStack(nn.Module):
   """Stack-based generative model with dynamic programming inference.""" 
 
   def __init__(self, vocab_size, embedding_size, hidden_size, num_layers,
-               dropout, init_weight_range, num_features, use_cuda):
+               dropout, init_weight_range, num_features, stack_next, use_cuda):
     super(DPStack, self).__init__()
     self.use_cuda = use_cuda
+    self.stack_next = stack_next
     self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, embedding_size, 
         hidden_size, num_layers, dropout, init_weight_range, bidirectional=False, use_cuda=use_cuda)
 
@@ -82,7 +83,7 @@ class DPStack(nn.Module):
     max_dependency_length = 20
 
     features = nn_utils.batch_feature_selection(encoder_features, seq_length,
-        self.use_cuda)
+        self.use_cuda, stack_next=self.stack_next)
     re_probs_list = self.binary_normalize(self.transition_model(features)).view(-1)
     word_distr_list = self.log_normalize(self.word_model(features))
 
@@ -134,7 +135,7 @@ class DPStack(nn.Module):
     #print(encoder_features)
     # dim [num_pairs, batch_size, 2, state_size]
     features = nn_utils.batch_feature_selection(encoder_features, seq_length,
-        self.use_cuda)
+        self.use_cuda, stack_next=self.stack_next)
     #print(features)
     num_pairs = features.size()[0]
 
@@ -147,20 +148,27 @@ class DPStack(nn.Module):
 
     word_distr_list = self.log_normalize(self.word_model(features)).view(num_pairs, batch_size, -1) 
 
-    init_features = nn_utils.select_features(encoder_features, [0, 0], 
-                                             self.use_cuda)
-    # dim [batch_size x vocab_size]
-    init_word_distr = self.log_normalize(self.word_model(init_features))
     # do simple arithmetic to access distribution list entries
+    #def get_feature_index(i, j):
+    #  return int((2*seq_length-i-1)*(i/2) + j-i-1)
+
+    # rather enumerate indexes
+    inds_table = np.zeros((seq_length, seq_length), dtype=np.int)
+    counter = 0
+    for i in range(seq_length-1):
+      for j in range(i+1, seq_length):
+        inds_table[i, j-1 if self.stack_next else j] = counter
+        counter += 1
+
     def get_feature_index(i, j):
-      return int((2*seq_length-i-1)*(i/2) + j-i-1)
+      return inds_table[i, j]
 
     # rather enumerate indexes for the reverse
     rev_inds_table = np.zeros((seq_length, seq_length), dtype=np.int)
     counter = 0
     for j in range(1, seq_length):
       for i in range(j):
-        rev_inds_table[i,j] = counter
+        rev_inds_table[i, j-1 if self.stack_next else j] = counter
         counter += 1
 
     def get_rev_feature_index(i, j):
@@ -171,7 +179,14 @@ class DPStack(nn.Module):
         table_size, batch_size).fill_(-np.inf), self.use_cuda)
 
     # word probs
-    table[0, 0, 1] = torch.gather(init_word_distr, 1, sentence[1].view(-1, 1))
+    if self.stack_next:
+      table[0, 0, 1] = nn_utils.to_var(torch.FloatTensor(batch_size).fill_(0), self.use_cuda)
+    else:  
+      init_features = nn_utils.select_features(encoder_features, [0, 0], 
+                                               self.use_cuda)
+      # dim [batch_size x vocab_size]
+      init_word_distr = self.log_normalize(self.word_model(init_features))
+      table[0, 0, 1] = torch.gather(init_word_distr, 1, sentence[1].view(-1, 1))
     for i in range(sent_length-1): 
       start_index = get_feature_index(i, i+1)
       end_index = get_feature_index(i, sent_length-1) + 1
@@ -182,7 +197,7 @@ class DPStack(nn.Module):
       for j in range(i+1, sent_length):
         index = get_feature_index(i, j)
         word_probs[j - (i + 1)] = torch.gather(word_distr_list[index], 1,
-            sentence[j+1].view(-1, 1))
+            sentence[j if self.stack_next else j+1].view(-1, 1))
       sh_probs = sh_log_probs_list[start_index:end_index] + word_probs
 
       # Cannot do scatter asign to table directly
@@ -209,8 +224,10 @@ class DPStack(nn.Module):
             + re_log_probs_list[start_ind:end_ind].view(
                 1, -1, batch_size).expand(max(i, 1), gap - 1, batch_size))
         table[0:max(i, 1), i, j] = nn_utils.log_sum_exp(all_block_scores, 1)
-          
-    return table[0, 0, sent_length]
+     
+    final_score = re_log_probs_list[get_feature_index(0, 
+        sent_length-1 if self.stack_next else sent_length)]
+    return table[0, 0, sent_length] + final_score
 
   def _decode_action_sequence(self, encoder_features, word_ids, actions):
     """Execute a given action sequence, also find best relations."""
@@ -220,9 +237,9 @@ class DPStack(nn.Module):
     sent_length = len(word_ids) - 1
 
     transition_logits = []
-    shift_dependents = [-1 for _ in word_ids] # stack top when shifted
-      # but model actually uses stack top when generated to buffer
-    reduce_dependents = [-1 for _ in word_ids] # buffer entry when reduced
+    buffer_shift_dependents = [-1 for _ in word_ids] # stack top when generated
+    stack_shift_dependents = [-1 for _ in word_ids] # interpret SH as (eager) RA
+    reduce_dependents = [-1 for _ in word_ids]
 
     for action in actions:
       transition_logit = None
@@ -230,7 +247,8 @@ class DPStack(nn.Module):
       s0 = stack[-1] if len(stack) > 0 else 0
 
       if len(stack) > 1: # allowed to re
-        position = nn_utils.extract_feature_positions(buffer_index, s0)
+        position = nn_utils.extract_feature_positions(buffer_index, s0,
+            stack_next=self.stack_next)
         features = nn_utils.select_features(encoder_features, position, self.use_cuda)
         
         transition_logit = self.transition_model(features)
@@ -242,7 +260,9 @@ class DPStack(nn.Module):
       # excecute action
       if action == data_utils._SSH:
         if len(stack) > 0:
-          shift_dependents[buffer_index] = stack[-1]
+          stack_shift_dependents[buffer_index] = stack[-1]
+          if buffer_index + 1 < len(word_ids):
+            buffer_shift_dependents[buffer_index+1] = stack[-1]
         stack.append(buffer_index) 
         buffer_index += 1
       else:  
@@ -250,7 +270,7 @@ class DPStack(nn.Module):
         child = stack.pop()
         reduce_dependents[child] = buffer_index
         
-    return transition_logits, actions, shift_dependents, reduce_dependents
+    return transition_logits, actions, buffer_shift_dependents, stack_shift_dependents
 
 
   def _viterbi_algorithm(self, encoder_features, word_ids):
@@ -265,7 +285,7 @@ class DPStack(nn.Module):
     word_log_probs.fill(-np.inf)
 
     features = nn_utils.batch_feature_selection(encoder_features, seq_length,
-        self.use_cuda)
+        self.use_cuda, stack_next=self.stack_next)
     re_probs_list = nn_utils.to_numpy(self.binary_normalize(self.transition_model(features)))
     word_distr_list = self.log_normalize(self.word_model(features))
 
@@ -274,7 +294,8 @@ class DPStack(nn.Module):
       for j in range(i+1, seq_length):
         reduce_probs[i, j] = re_probs_list[counter, 0]
         if self.word_model is not None and j < sent_length:
-          word_log_probs[i, j] = nn_utils.to_numpy(word_distr_list[counter, word_ids[j+1]])
+          word_log_probs[i, j] = nn_utils.to_numpy(
+              word_distr_list[counter, word_ids[j if self.stack_next else j+1]])
         counter += 1
 
     table_size = len(word_ids)
@@ -283,10 +304,13 @@ class DPStack(nn.Module):
     split_indexes = np.zeros((table_size, table_size, table_size), dtype=np.int)
 
     # first word prob 
-    init_features = nn_utils.select_features(encoder_features, [0, 0], 
+    if self.stack_next:
+      table[0, 0, 1] = 0
+    else:
+      init_features = nn_utils.select_features(encoder_features, [0, 0], 
                                              self.use_cuda)
-    init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
-    table[0, 0, 1] = nn_utils.to_numpy(init_word_distr[word_ids[1]])
+      init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
+      table[0, 0, 1] = nn_utils.to_numpy(init_word_distr[word_ids[1]])
 
     for j in range(2, sent_length+1):
       for i in range(j-1):

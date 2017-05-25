@@ -30,17 +30,19 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
   def __init__(self, vocab_size, num_relations,
       embedding_size, hidden_size, num_layers, dropout, init_weight_range, 
       bidirectional, more_context, predict_relations, generative, 
-      decompose_actions, batch_size, use_cuda, model_path='', load_model=False):
+      decompose_actions, stack_next, batch_size, use_cuda, model_path, 
+      load_model, late_reduce_oracle):
     assert not decompose_actions and not more_context
     num_transitions = 3
     num_features = 3 # now including headed feature
     super(ArcEagerTransitionSystem, self).__init__(vocab_size, num_relations,
         num_features, num_transitions, embedding_size, hidden_size, 
         num_layers, dropout, init_weight_range, bidirectional,
-        predict_relations, generative, decompose_actions,
+        predict_relations, generative, decompose_actions, stack_next,
         batch_size, use_cuda, model_path, load_model)
     self.more_context = False
     self.generate_actions = [data_utils._SH, data_utils._RA]
+    self.late_reduce_oracle = late_reduce_oracle
 
     if load_model:
       assert model_path != ''
@@ -61,6 +63,12 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
   def init_weights(self, initrange=0.1):
     self.embed_headed.weight.data.uniform_(-initrange, initrange)
     self.embed_shift.weight.data.uniform_(-initrange, initrange)
+
+  def store_model(self, path):
+    super(ArcEagerTransitionSystem, self).store_model(path)
+    model_fn = path + '_headembed.pt'
+    with open(model_fn, 'wb') as f:
+      torch.save(self.embed_headed, f)
 
   def map_transitions(self, actions):
     nactions = []
@@ -171,9 +179,8 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
           else:
             action = data_utils._LA
 
-        if (self.relation_model is not None
-            and (action == data_utils._LA or action == data_utils._RA
-                 or buffer_index == sent_length)):
+        if self.relation_model is not None:
+          # Need it for shift, so just as well do it for everything
           relation_logit = self.relation_model(features)      
           relation_logit_np = relation_logit.type(torch.FloatTensor).data.numpy()
           label = int(relation_logit_np.argmax(axis=1)[0])
@@ -318,18 +325,18 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     for gap in range(2, sent_length+1):
       for i in range(sent_length+1-gap):
         j = i + gap
-        for c in range(2):
+        for c in range(1 if i == 0 else 2):
           temp_right = []
           temp_headed = []
           for k in range(i+1, j):
             score0 = table[i, c, k, 0, j] + re_log_probs[k, j, 0]
             score1 = table[i, c, k, 1, j] + re_log_probs[k, j, 1]
-            if score0 > score1:
-              temp_right.append(score0)
-              temp_headed.append(0)
-            else:
+            if score1 > score0 or (j == sent_length):
               temp_right.append(score1)
               temp_headed.append(1)
+            else:
+              temp_right.append(score0)
+              temp_headed.append(0)
 
           for l in range(max(i, 1)):
             for b in range(1 if i == 0 else 2):
@@ -352,8 +359,9 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
           return [data_utils._RA]
       else:
         k = split_indexes[l, b, i, c, j]
-        assert k > i and k < j, str(i) + ' ' + str(k) + ' ' + str(j)
         headed = headedness[l, b, i, c, j]
+        if j == sent_length:
+          assert headed
         act = data_utils._LA if headed == 0 else data_utils._RE
         return (backtrack_path(l, b, i, c, k) 
                 + backtrack_path(i, c, k, headed, j) + [act])
@@ -444,7 +452,10 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
           for k in range(i+1, j):
             score0 = table[i, c, k, 0, j] + re_log_probs[k, j, 0]
             score1 = table[i, c, k, 1, j] + re_log_probs[k, j, 1]
-            temp_right.append(np.logaddexp(score0, score1))
+            if j == sent_length:
+              temp_right.append(score1)
+            else:
+              temp_right.append(np.logaddexp(score0, score1))
 
           for l in range(max(i, 1)):
             for b in range(1 if i == 0 else 2):
@@ -457,7 +468,6 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     return table[0, 0, 0, 0, sent_length] 
 
 
-
   def oracle(self, conll, encoder_features):
     # Training oracle for single parsed sentence.
     stack = data_utils.ParseForest([])
@@ -465,8 +475,6 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     buf = data_utils.ParseForest([conll[0]])
     buffer_index = 0
     sent_length = len(conll)
-
-    late_reduce = True
 
     count_left_parent = [False for _ in conll]
     count_left_children = [0 for _ in conll]
@@ -500,7 +508,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
         elif buf.roots[0].parent_id == stack.roots[-1].id:
           action = data_utils._RA 
         elif stack_has_parent[-1]:
-          if (late_reduce and 
+          if (self.late_reduce_oracle and 
               ((has_left_parent[buffer_index] and not
                 count_left_parent[buffer_index]) 
                or (count_left_children[buffer_index] <

@@ -139,6 +139,7 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
           pos_vocab, rel_vocab):
   vocab_size = len(word_vocab)
   num_relations = len(rel_vocab)
+  model_path = args.working_dir + '/' + args.save_model
   lr = args.lr
 
   # Build the model
@@ -149,13 +150,15 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
         args.hidden_size, args.num_layers, args.dropout,
         args.init_weight_range, args.bidirectional, 
         args.use_more_features, args.predict_relations, args.generative,
-        args.decompose_actions, args.batch_size, args.cuda)
+        args.decompose_actions, args.stack_next, args.batch_size, args.cuda,
+        model_path, False)
   elif args.arc_eager:
     tr_system = arc_eager.ArcEagerTransitionSystem(vocab_size,
         num_relations, args.embedding_size, args.hidden_size, args.num_layers,
         args.dropout, args.init_weight_range, args.bidirectional, 
         args.use_more_features, args.predict_relations, args.generative,
-        args.decompose_actions, args.batch_size, args.cuda)
+        args.decompose_actions, args.stack_next, args.batch_size, args.cuda,
+        model_path, False, args.late_reduce_oracle)
 
   criterion = nn.CrossEntropyLoss(size_average=False)
   binary_criterion = nn.BCELoss(size_average=False)
@@ -356,32 +359,14 @@ def train(args, sentences, dev_sentences, test_sentences, word_vocab,
     else:
       patience_count = 0
       prev_val_loss = val_loss
-      # save the model
-      working_path = args.working_dir + '/'
+      store_this_iter = True
       # Saves the model. #TODO save only parameters
       if args.save_model != '':
-        model_fn = working_path + args.save_model + '_encoder.pt'
-        with open(model_fn, 'wb') as f:
-          torch.save(tr_system.encoder_model, f)
-        model_fn = working_path + args.save_model + '_transition.pt'
-        with open(model_fn, 'wb') as f:
-          torch.save(tr_system.transition_model, f)
-        if args.predict_relations:
-          model_fn = working_path + args.save_model + '_relation.pt'
-          with open(model_fn, 'wb') as f:
-            torch.save(tr_system.relation_model, f)
-        if args.generative:
-          model_fn = working_path + args.save_model + '_word.pt'
-          with open(model_fn, 'wb') as f:
-            torch.save(tr_system.word_model, f)
-        if args.decompose_actions:
-          model_fn = working_path + args.save_model + '_direction.pt'
-          with open(model_fn, 'wb') as f:
-            torch.save(tr_system.direction_model, f)
-        if args.arc_eager:
-          model_fn = working_path + args.save_model + '_headembed.pt'
-          with open(model_fn, 'wb') as f:
-            torch.save(tr_system.embed_headed, f)
+        tr_system.store_model(args.working_dir + '/' + args.save_model)
+
+    if args.store_all_iterations:
+      tr_system.store_model(args.working_dir + '/' + args.save_model + '_' +
+          str(epoch))
 
     if args.patience > 0 and patience_count >= args.patience:
       break
@@ -401,13 +386,14 @@ def score(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
         args.hidden_size, args.num_layers, args.dropout,
         args.init_weight_range, args.bidirectional, 
         args.use_more_features, args.predict_relations, args.generative,
-        args.decompose_actions, args.batch_size, args.cuda, model_path, True)
+        args.decompose_actions, args.stack_next, args.batch_size, args.cuda, model_path, True)
   elif args.arc_eager:
     tr_system = arc_eager.ArcEagerTransitionSystem(vocab_size,
         num_relations, args.embedding_size, args.hidden_size, args.num_layers,
         args.dropout, args.init_weight_range, args.bidirectional, 
         args.use_more_features, args.predict_relations, args.generative,
-        args.decompose_actions, args.batch_size, args.cuda, model_path, True)
+        args.decompose_actions, args.stack_next, args.batch_size, args.cuda, model_path, True,
+        args.late_reduce_oracle)
 
   print('Done loading models')
 
@@ -439,13 +425,15 @@ def decode(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
         args.hidden_size, args.num_layers, args.dropout,
         args.init_weight_range, args.bidirectional, 
         args.use_more_features, args.predict_relations, args.generative,
-        args.decompose_actions, args.batch_size, args.cuda, model_path, True)
+        args.decompose_actions, args.stack_next,
+        args.batch_size, args.cuda, model_path, True)
   elif args.arc_eager:
     tr_system = arc_eager.ArcEagerTransitionSystem(vocab_size,
         num_relations, args.embedding_size, args.hidden_size, args.num_layers,
         args.dropout, args.init_weight_range, args.bidirectional, 
         args.use_more_features, args.predict_relations, args.generative,
-        args.decompose_actions, args.batch_size, args.cuda, model_path, True)
+        args.decompose_actions, args.stack_next,
+        args.batch_size, args.cuda, model_path, True, args.late_reduce_oracle)
 
   print('Done loading models')
 
@@ -509,6 +497,8 @@ if __name__=='__main__':
                       help='Arc hybrid transition system')
   parser.add_argument('--arc_eager', action='store_true',
                       help='Arc eager transition system')
+  parser.add_argument('--late_reduce_oracle', action='store_true',
+                      help='Arc eager late reduce oracle')
 
   parser.add_argument('--embedding_size', type=int, default=128,
                       help='size of word embeddings')
@@ -551,6 +541,8 @@ if __name__=='__main__':
                       help='use 4 instead of 2 features')
   parser.add_argument('--unsup', action='store_true',
                       help='unsupervised model')
+  parser.add_argument('--stack_next', action='store_true',
+                      help='predict stack-next instead of buffer-next')
 
   parser.add_argument('--criterion_size_average', 
                       dest='criterion_size_average', action='store_true', 
@@ -576,8 +568,10 @@ if __name__=='__main__':
                       help='use small version of dataset')
   parser.add_argument('--logging_interval', type=int, default=5000, 
                       metavar='N', help='report ppl every x steps')
-  parser.add_argument('--save_model', type=str,  default='model.pt',
-                      help='path to save the final model')
+  parser.add_argument('--store_all_iterations', action='store_true',
+                      help='store model at all iterations')
+  parser.add_argument('--save_model', type=str,  default='model',
+                      help='path to save the final model, exclude extension')
 
   args = parser.parse_args()
   assert not (args.generative and args.bidirectional), 'Bidirectional encoder invalid for generative model'
