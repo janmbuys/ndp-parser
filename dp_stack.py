@@ -161,7 +161,7 @@ class DPStack(nn.Module):
         counter += 1
 
     def get_feature_index(i, j):
-      return inds_table[i, j]
+      return inds_table[i, j-1 if self.stack_next else j]
 
     # rather enumerate indexes for the reverse
     rev_inds_table = np.zeros((seq_length, seq_length), dtype=np.int)
@@ -172,7 +172,7 @@ class DPStack(nn.Module):
         counter += 1
 
     def get_rev_feature_index(i, j):
-      return rev_inds_table[i, j]
+      return rev_inds_table[i, j-1 if self.stack_next else j]
 
     table_size = sentence.size()[0]
     table = nn_utils.to_var(torch.FloatTensor(table_size, table_size, 
@@ -225,8 +225,7 @@ class DPStack(nn.Module):
                 1, -1, batch_size).expand(max(i, 1), gap - 1, batch_size))
         table[0:max(i, 1), i, j] = nn_utils.log_sum_exp(all_block_scores, 1)
      
-    final_score = re_log_probs_list[get_feature_index(0, 
-        sent_length-1 if self.stack_next else sent_length)]
+    final_score = re_log_probs_list[get_feature_index(0, sent_length)]
     return table[0, 0, sent_length] + final_score
 
   def _decode_action_sequence(self, encoder_features, word_ids, actions):
