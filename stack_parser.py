@@ -81,7 +81,7 @@ def train_unsup(args, sentences, dev_sentences, test_sentences, word_vocab):
     epoch_start_time = time.time()
     
     random.shuffle(sentences)
-    sentences.sort(key=len)
+    sentences.sort(key=len) 
     stack_model.train()
 
     total_loss = 0 
