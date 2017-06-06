@@ -268,7 +268,7 @@ if __name__=='__main__':
         loss.backward()
 
         if args.grad_clip > 0:
-          nn_utils.clip_grad_norm(model.parameters(), args.grad_clip)
+          nn.utils.clip_grad_norm(model.parameters(), args.grad_clip)
         optimizer.step() 
         total_loss += loss.data
         global_loss += loss.data

@@ -102,7 +102,7 @@ def train(args, sentences, dev_sentences, word_vocab):
       if loss is not None:
         loss.backward()
         if args.grad_clip > 0:
-          nn_utils.clip_grad_norm(params, args.grad_clip)
+          nn.utils.clip_grad_norm(params, args.grad_clip)
         optimizer.step() 
         total_loss += loss.data
         global_loss += loss.data

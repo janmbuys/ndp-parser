@@ -109,6 +109,8 @@ if __name__=='__main__':
                       help='unsupervised model')
   parser.add_argument('--stack_next', action='store_true',
                       help='predict stack-next instead of buffer-next')
+  parser.add_argument('--non_lin', type=int, default=0, 
+                      help='transition classifier non-linearity')
 
   parser.add_argument('--criterion_size_average', 
                       dest='criterion_size_average', action='store_true', 
@@ -184,7 +186,7 @@ if __name__=='__main__':
   #data_utils.create_length_histogram(sentences, args.working_dir)
 
   if args.small_data:
-    sentences = sentences[:500]
+    sentences = sentences[:200]
     #dev_sentences = dev_sentences
     dev_sentences = dev_sentences[:200]
 

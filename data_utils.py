@@ -29,6 +29,12 @@ _ULA = 1
 
 _EOS = 0
 
+_LIN = 0
+_RELU = 1
+_TANH = 2
+_SIG = 3
+
+
 class ConllEntry:
   def __init__(self, id, form, pos, cpos, parent_id=None, relation=None):
     self.id = id

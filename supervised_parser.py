@@ -13,7 +13,7 @@ import nn_utils
 import arc_hybrid
 import arc_eager 
 
-def training_decode(args, tr_system, val_sentences, epoch=-1):
+def training_decode(args, tr_system, val_sentences, rel_vocab, epoch=-1):
   val_batch_size = 1
   total_loss = 0
   total_length = 0
@@ -33,6 +33,7 @@ def training_decode(args, tr_system, val_sentences, epoch=-1):
     encoder_output = tr_system.encoder_model(sentence_data, encoder_state)
 
     if args.viterbi_decode:
+      #score = tr_system.inside_score(val_sent.conll, encoder_output)
       predict, transition_logits, direction_logits, actions, relation_logits, labels, gen_word_logits, words = tr_system.viterbi_decode(
           val_sent.conll, encoder_output)
     else:
@@ -124,6 +125,7 @@ def decode(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
   num_relations = len(rel_vocab)
   batch_size = 1
   model_path = args.working_dir + '/' + args.save_model
+  non_lin = args.non_lin #TODO better interface
 
   # Build the model
   assert args.arc_hybrid or args.arc_eager
@@ -132,14 +134,16 @@ def decode(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
         num_relations, args.embedding_size, 
         args.hidden_size, args.num_layers, args.dropout,
         args.init_weight_range, args.bidirectional, 
-        args.use_more_features, args.predict_relations, args.generative,
+        args.use_more_features, non_lin,
+        args.predict_relations, args.generative,
         args.decompose_actions, args.stack_next,
         args.batch_size, args.cuda, model_path, True)
   elif args.arc_eager:
     tr_system = arc_eager.ArcEagerTransitionSystem(vocab_size,
         num_relations, args.embedding_size, args.hidden_size, args.num_layers,
         args.dropout, args.init_weight_range, args.bidirectional, 
-        args.use_more_features, args.predict_relations, args.generative,
+        args.use_more_features, non_lin,
+        args.predict_relations, args.generative,
         args.decompose_actions, args.stack_next,
         args.batch_size, args.cuda, model_path, True, args.late_reduce_oracle)
 
@@ -147,7 +151,7 @@ def decode(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
 
   decode_start_time = time.time()
   total_loss, total_length, total_length_more = training_decode(args,
-          tr_system, val_sentences)
+          tr_system, val_sentences, rel_vocab)
 
   val_loss = total_loss[0] / total_length
   val_loss_more = total_loss[0] / total_length_more
@@ -165,6 +169,7 @@ def score(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
   batch_size = 1
   model_path = args.working_dir + '/' + args.save_model
   assert args.generative
+  non_lin = args.non_lin #TODO better interface
 
   # Build the model
   assert args.arc_hybrid or args.arc_eager
@@ -173,13 +178,15 @@ def score(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
         num_relations, args.embedding_size, 
         args.hidden_size, args.num_layers, args.dropout,
         args.init_weight_range, args.bidirectional, 
-        args.use_more_features, args.predict_relations, args.generative,
+        args.use_more_features, non_lin,
+        args.predict_relations, args.generative,
         args.decompose_actions, args.stack_next, args.batch_size, args.cuda, model_path, True)
   elif args.arc_eager:
     tr_system = arc_eager.ArcEagerTransitionSystem(vocab_size,
         num_relations, args.embedding_size, args.hidden_size, args.num_layers,
         args.dropout, args.init_weight_range, args.bidirectional, 
-        args.use_more_features, args.predict_relations, args.generative,
+        args.use_more_features, non_lin,
+        args.predict_relations, args.generative,
         args.decompose_actions, args.stack_next, args.batch_size, args.cuda, model_path, True,
         args.late_reduce_oracle)
 
@@ -205,6 +212,7 @@ def train(args, sentences, dev_sentences, word_vocab, pos_vocab, rel_vocab):
   num_relations = len(rel_vocab)
   model_path = args.working_dir + '/' + args.save_model
   lr = args.lr
+  non_lin = args.non_lin #TODO better interface
 
   # Build the model
   assert args.arc_hybrid or args.arc_eager
@@ -213,14 +221,16 @@ def train(args, sentences, dev_sentences, word_vocab, pos_vocab, rel_vocab):
         num_relations, args.embedding_size, 
         args.hidden_size, args.num_layers, args.dropout,
         args.init_weight_range, args.bidirectional, 
-        args.use_more_features, args.predict_relations, args.generative,
+        args.use_more_features, non_lin,
+        args.predict_relations, args.generative,
         args.decompose_actions, args.stack_next, args.batch_size, args.cuda,
         model_path, False)
   elif args.arc_eager:
     tr_system = arc_eager.ArcEagerTransitionSystem(vocab_size,
         num_relations, args.embedding_size, args.hidden_size, args.num_layers,
         args.dropout, args.init_weight_range, args.bidirectional, 
-        args.use_more_features, args.predict_relations, args.generative,
+        args.use_more_features, non_lin,
+        args.predict_relations, args.generative,
         args.decompose_actions, args.stack_next, args.batch_size, args.cuda,
         model_path, False, args.late_reduce_oracle)
 
@@ -235,6 +245,7 @@ def train(args, sentences, dev_sentences, word_vocab, pos_vocab, rel_vocab):
     params += list(tr_system.word_model.parameters())
   if args.decompose_actions:
     params += list(tr_system.direction_model.parameters())
+  assert params is not None
 
   if args.adam:
     optimizer = optim.Adam(params, lr=lr)
@@ -353,8 +364,8 @@ def train(args, sentences, dev_sentences, word_vocab, pos_vocab, rel_vocab):
       global_num_tokens += len(train_sent) - 1 
       if loss is not None:
         loss.backward()
-        if args.grad_clip > 0:
-          nn_utils.clip_grad_norm(params, args.grad_clip)
+        if args.grad_clip > 0: #TODO official gradient clipping
+           nn.utils.clip_grad_norm(params, args.grad_clip) #TODO no gradient
         optimizer.step() 
         total_loss += loss.data
         global_loss += loss.data
@@ -380,7 +391,7 @@ def train(args, sentences, dev_sentences, word_vocab, pos_vocab, rel_vocab):
     if True: # TODO maybe parameterize train decode option
       decode_start_time = time.time()
       total_loss, total_length, total_length_more = training_decode(args, 
-          tr_system, dev_sentences, epoch)
+          tr_system, dev_sentences, rel_vocab, epoch)
       val_loss = total_loss[0] / total_length
       val_loss_more = total_loss[0] / total_length_more
 

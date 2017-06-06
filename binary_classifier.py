@@ -28,7 +28,7 @@ class BinaryClassifier(nn.Module):
   def forward(self, features): # features dim: [batch_size, num_features, feature_size]
     flat_features = features.view(-1, self.encode_size)
     hidden = self.encode(flat_features)
-    hidden_nonlin = F.tanh(hidden) # it would be faster to do avoid hidden layer
+    hidden_nonlin = F.relu(hidden) #TODO parameterize
     logits = self.project(hidden_nonlin)
     return logits
 

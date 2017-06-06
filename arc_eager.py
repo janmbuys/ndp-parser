@@ -17,36 +17,39 @@ import transition_system as tr
 class ArcEagerTransitionSystem(tr.TransitionSystem):
   def __init__(self, vocab_size, num_relations,
       embedding_size, hidden_size, num_layers, dropout, init_weight_range, 
-      bidirectional, more_context, predict_relations, generative, 
+      bidirectional, more_context, non_lin, 
+      predict_relations, generative, 
       decompose_actions, stack_next, batch_size, use_cuda, model_path, 
       load_model, late_reduce_oracle):
     assert not decompose_actions and not more_context
     num_transitions = 3
-    num_features = 3 # now including headed feature
+    num_features = 2 # TODO not including headed feature
     super(ArcEagerTransitionSystem, self).__init__(vocab_size, num_relations,
-        num_features, num_transitions, embedding_size, hidden_size, 
-        num_layers, dropout, init_weight_range, bidirectional,
+        num_features, num_transitions, 1, 2, embedding_size, hidden_size, 
+        num_layers, dropout, init_weight_range, bidirectional, non_lin,
+        data_utils._LIN, #TODO parameterize
         predict_relations, generative, decompose_actions, stack_next,
         batch_size, use_cuda, model_path, load_model)
     self.more_context = False
     self.generate_actions = [data_utils._SH, data_utils._RA]
     self.late_reduce_oracle = late_reduce_oracle
 
-    if load_model:
-      assert model_path != ''
-      model_fn = model_path + '_headembed.pt'
-      with open(model_fn, 'rb') as f:
-        self.embed_headed = torch.load(f)
-    else:  
-      # embed binary features
-      self.embed_headed = nn.Embedding(2, self.feature_size)
-      self.embed_shift = nn.Embedding(2, self.feature_size) #TODO
-      self.init_weights(init_weight_range)
-     
-    if use_cuda:
-      self.embed_headed.cuda()
-      if not load_model: #TODO
-        self.embed_shift.cuda()
+    if False: # TODO remove
+      if load_model:
+        assert model_path != ''
+        model_fn = model_path + '_headembed.pt'
+        with open(model_fn, 'rb') as f:
+          self.embed_headed = torch.load(f)
+      else:  
+        # embed binary features
+        self.embed_headed = nn.Embedding(2, self.feature_size)
+        self.embed_shift = nn.Embedding(2, self.feature_size) #TODO
+        self.init_weights(init_weight_range)
+       
+      if use_cuda:
+        self.embed_headed.cuda()
+        if not load_model: #TODO
+          self.embed_shift.cuda()
 
   def init_weights(self, initrange=0.1):
     self.embed_headed.weight.data.uniform_(-initrange, initrange)
@@ -54,9 +57,10 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
 
   def store_model(self, path):
     super(ArcEagerTransitionSystem, self).store_model(path)
-    model_fn = path + '_headembed.pt'
-    with open(model_fn, 'wb') as f:
-      torch.save(self.embed_headed, f)
+    if False:
+      model_fn = path + '_headembed.pt'
+      with open(model_fn, 'wb') as f:
+        torch.save(self.embed_headed, f)
 
   def map_transitions(self, actions):
     nactions = []
@@ -125,8 +129,9 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
       position = nn_utils.extract_feature_positions(buffer_index, s0)
       encoded_features = nn_utils.select_features(encoder_features, position, self.use_cuda)
       head_ind = torch.LongTensor([1 if stack_has_parent and stack_has_parent[-1] else 0]).view(1, 1)
-      head_feat = self.embed_headed(nn_utils.to_var(head_ind, self.use_cuda)) 
-      features = torch.cat((encoded_features, head_feat), 0)
+      # head_feat = self.embed_headed(nn_utils.to_var(head_ind, self.use_cuda)) 
+      # features = torch.cat((encoded_features, head_feat), 0) #TODO
+      features = encoded_features
 
       if len(stack) > 0: # allowed to ra or la
         transition_logit = self.transition_model(features)
@@ -254,32 +259,40 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     head_ind0 = torch.LongTensor(num_items).fill_(0)
     head_ind1 = torch.LongTensor(num_items).fill_(1)
             
-    head_feat0 = self.embed_headed(nn_utils.to_var(head_ind0, self.use_cuda)) 
-    head_feat1 = self.embed_headed(nn_utils.to_var(head_ind1, self.use_cuda)) 
-    head_features = torch.cat((head_feat0.view(num_items, 1, 1, 1, -1), 
-                               head_feat1.view(num_items, 1, 1, 1, -1)),
-                              1)
-    features = torch.cat((encoded_features, head_features), 3)
+    #head_feat0 = self.embed_headed(nn_utils.to_var(head_ind0, self.use_cuda)) 
+    #head_feat1 = self.embed_headed(nn_utils.to_var(head_ind1, self.use_cuda)) 
+    #head_features = torch.cat((head_feat0.view(num_items, 1, 1, 1, -1), 
+    #                           head_feat1.view(num_items, 1, 1, 1, -1)), 1)
+    #features = torch.cat((encoded_features, head_features), 3) #TODO
 
+    #TODO this is breaking
+    #features = encoded_features
+    #tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
+    #    self.transition_model(features)).view(num_items, 2, self.num_transitions))
+
+    features = enc_features
     tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
-        self.transition_model(features)).view(num_items, 2, self.num_transitions))
+        self.transition_model(features)).view(num_items, self.num_transitions))
+
     if self.word_model is not None:
+      #word_dist = self.log_normalize(self.word_model(features)).view(
+      #    num_items, 2, self.vocab_size)
       word_dist = self.log_normalize(self.word_model(features)).view(
-          num_items, 2, self.vocab_size)
+          num_items, self.vocab_size)
 
     counter = 0 
     for i in range(seq_length-1):
       for j in range(i+1, seq_length):
         for c in range(2):
-          shift_log_probs[i, j, c] = tr_log_probs_list[counter, c, data_utils._ESH]
-          ra_log_probs[i, j, c] = tr_log_probs_list[counter, c, data_utils._ERA]
-          re_log_probs[i, j, c] = tr_log_probs_list[counter, c, data_utils._ERE]
+          shift_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ESH]
+          ra_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ERA]
+          re_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ERE]
           if self.word_model is not None and j < sent_length:
             if j < sent_length - 1:
               word_id = conll[j+1].word_id 
             else:
               word_id = data_utils._EOS
-            word_log_probs[i, j, c] = nn_utils.to_numpy(word_dist[counter, c, word_id])
+            word_log_probs[i, j, c] = nn_utils.to_numpy(word_dist[counter, word_id])
         counter += 1
 
     table_size = sent_length + 1
@@ -294,7 +307,8 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     
     # first word prob 
     if self.word_model is not None:
-      init_features = nn_utils.select_features(encoder_features, [0, 0, 0], self.use_cuda)
+      #init_features = nn_utils.select_features(encoder_features, [0, 0, 0], self.use_cuda) #TODO
+      init_features = nn_utils.select_features(encoder_features, [0, 0], self.use_cuda)
       init_word_dist = self.log_normalize(self.word_model(init_features).view(-1))
       table[0, 0, 0, 0, 1] = nn_utils.to_numpy(init_word_dist[conll[1].word_id])
     else:
@@ -388,38 +402,45 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     head_ind0 = torch.LongTensor(num_items).fill_(0)
     head_ind1 = torch.LongTensor(num_items).fill_(1)
             
-    head_feat0 = self.embed_headed(nn_utils.to_var(head_ind0, self.use_cuda)) 
-    head_feat1 = self.embed_headed(nn_utils.to_var(head_ind1, self.use_cuda)) 
-    head_features = torch.cat((head_feat0.view(num_items, 1, 1, 1, -1), 
-                               head_feat1.view(num_items, 1, 1, 1, -1)),
-                              1)
-    features = torch.cat((encoded_features, head_features), 3)
+    #head_feat0 = self.embed_headed(nn_utils.to_var(head_ind0, self.use_cuda)) 
+    #head_feat1 = self.embed_headed(nn_utils.to_var(head_ind1, self.use_cuda)) 
+    #head_features = torch.cat((head_feat0.view(num_items, 1, 1, 1, -1), 
+    #                           head_feat1.view(num_items, 1, 1, 1, -1)), 1)
+    #features = torch.cat((encoded_features, head_features), 3) #TODO
+    #features = encoded_features
+    features = enc_features
+
+    #tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
+    #    self.transition_model(features)).view(num_items, 2, self.num_transitions))
+    #word_dist = self.log_normalize(self.word_model(features)).view(
+    #        num_items, 2, self.vocab_size)
 
     tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
-        self.transition_model(features)).view(num_items, 2, self.num_transitions))
+        self.transition_model(features)).view(num_items, self.num_transitions))
     word_dist = self.log_normalize(self.word_model(features)).view(
-            num_items, 2, self.vocab_size)
+        num_items, self.vocab_size)
 
     counter = 0 
     for i in range(seq_length-1):
       for j in range(i+1, seq_length):
         for c in range(2):
-          shift_log_probs[i, j, c] = tr_log_probs_list[counter, c, data_utils._ESH]
-          ra_log_probs[i, j, c] = tr_log_probs_list[counter, c, data_utils._ERA]
-          re_log_probs[i, j, c] = tr_log_probs_list[counter, c, data_utils._ERE]
+          shift_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ESH]
+          ra_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ERA]
+          re_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ERE]
           if j < sent_length:
             if j < sent_length - 1:
               word_id = conll[j+1].word_id 
             else:
               word_id = data_utils._EOS
-            word_log_probs[i, j, c] = nn_utils.to_numpy(word_dist[counter, c, word_id])
+            word_log_probs[i, j, c] = nn_utils.to_numpy(word_dist[counter, word_id])
         counter += 1
 
     table_size = sent_length + 1
     table = np.empty([table_size, 2, table_size, 2, table_size])
     table.fill(-np.inf) # log probabilities
 
-    init_features = nn_utils.select_features(encoder_features, [0, 0, 0], self.use_cuda)
+    #init_features = nn_utils.select_features(encoder_features, [0, 0, 0], self.use_cuda) #TODO
+    init_features = nn_utils.select_features(encoder_features, [0, 0], self.use_cuda)
     init_word_dist = self.log_normalize(self.word_model(init_features).view(-1))
     
     # word probs
@@ -510,8 +531,9 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
       encoded_feature = nn_utils.select_features(encoder_features, position, self.use_cuda)
      
       head_ind = torch.LongTensor([1 if stack_has_parent and stack_has_parent[-1] else 0]).view(1, 1)
-      head_feat = self.embed_headed(nn_utils.to_var(head_ind, self.use_cuda)) 
-      feature = torch.cat((encoded_feature, head_feat), 0)
+      #head_feat = self.embed_headed(nn_utils.to_var(head_ind, self.use_cuda)) 
+      #feature = torch.cat((encoded_feature, head_feat), 0) #TODO
+      feature = encoded_feature
       #TODO also add shift binary feature
 
       features.append(feature)
