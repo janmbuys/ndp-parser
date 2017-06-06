@@ -93,6 +93,7 @@ if __name__=='__main__':
                       help='weight initialization range')
   parser.add_argument('--adam', action='store_true',
                       help='use Adam optimizer')
+  parser.add_argument('--cudnn', action='store_true', default=False)
 
   parser.add_argument('--dropout', type=float, default=0.0, 
                       help='dropout rate')
@@ -147,8 +148,9 @@ if __name__=='__main__':
   torch.manual_seed(args.seed) 
   random.seed(args.seed)
   if args.cuda:
-    assert torch.cuda.is_available(), 'Cuda not available.'
+    assert torch.cuda.is_available(), 'Cuda not available!'
     torch.cuda.manual_seed(args.seed)
+    torch.backends.cudnn.enabled = args.cudnn
 
   data_path = args.data_dir + '/' 
   data_working_path = args.data_working_dir + '/'
@@ -182,7 +184,7 @@ if __name__=='__main__':
   #data_utils.create_length_histogram(sentences, args.working_dir)
 
   if args.small_data:
-    sentences = sentences[:100]
+    sentences = sentences[:500]
     #dev_sentences = dev_sentences
     dev_sentences = dev_sentences[:200]
 
