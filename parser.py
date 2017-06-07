@@ -111,6 +111,8 @@ if __name__=='__main__':
                       help='predict stack-next instead of buffer-next')
   parser.add_argument('--non_lin', type=int, default=0, 
                       help='transition classifier non-linearity')
+  parser.add_argument('--gen_non_lin', type=int, default=0, 
+                      help='transition classifier non-linearity')
 
   parser.add_argument('--criterion_size_average', 
                       dest='criterion_size_average', action='store_true', 

@@ -17,7 +17,7 @@ class ShiftReduceDP(nn.Module):
   """Stack-based generative model with dynamic programming inference.""" 
 
   def __init__(self, vocab_size, embedding_size, hidden_size, num_layers,
-               dropout, init_weight_range, num_features,
+               dropout, init_weight_range, num_features, non_lin, gen_non_lin,
                stack_next, use_cuda):
     super(ShiftReduceDP, self).__init__()
     self.use_cuda = use_cuda
@@ -27,9 +27,9 @@ class ShiftReduceDP(nn.Module):
 
     feature_size = hidden_size
     self.transition_model = binary_classifier.BinaryClassifier(num_features, 
-        feature_size, hidden_size, use_cuda) 
+        feature_size, hidden_size, non_lin, use_cuda) 
     self.word_model = classifier.Classifier(num_features, 0, feature_size,
-         hidden_size, vocab_size, data_utils._LIN, use_cuda) #TODO parameterize
+         hidden_size, vocab_size, gen_non_lin, use_cuda)
 
     self.log_normalize = nn.LogSoftmax()
     self.binary_normalize = nn.Sigmoid()

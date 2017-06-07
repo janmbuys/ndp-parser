@@ -17,7 +17,7 @@ import transition_system as tr
 class ArcEagerTransitionSystem(tr.TransitionSystem):
   def __init__(self, vocab_size, num_relations,
       embedding_size, hidden_size, num_layers, dropout, init_weight_range, 
-      bidirectional, more_context, non_lin, 
+      bidirectional, more_context, non_lin, gen_non_lin,
       predict_relations, generative, 
       decompose_actions, stack_next, batch_size, use_cuda, model_path, 
       load_model, late_reduce_oracle):
@@ -27,7 +27,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     super(ArcEagerTransitionSystem, self).__init__(vocab_size, num_relations,
         num_features, num_transitions, 1, 2, embedding_size, hidden_size, 
         num_layers, dropout, init_weight_range, bidirectional, non_lin,
-        data_utils._LIN, #TODO parameterize
+        gen_non_lin,
         predict_relations, generative, decompose_actions, stack_next,
         batch_size, use_cuda, model_path, load_model)
     self.more_context = False

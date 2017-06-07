@@ -126,6 +126,7 @@ def decode(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
   batch_size = 1
   model_path = args.working_dir + '/' + args.save_model
   non_lin = args.non_lin #TODO better interface
+  gen_non_lin = args.gen_non_lin
 
   # Build the model
   assert args.arc_hybrid or args.arc_eager
@@ -134,7 +135,7 @@ def decode(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
         num_relations, args.embedding_size, 
         args.hidden_size, args.num_layers, args.dropout,
         args.init_weight_range, args.bidirectional, 
-        args.use_more_features, non_lin,
+        args.use_more_features, non_lin, gen_non_lin,
         args.predict_relations, args.generative,
         args.decompose_actions, args.stack_next,
         args.batch_size, args.cuda, model_path, True)
@@ -142,7 +143,7 @@ def decode(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
     tr_system = arc_eager.ArcEagerTransitionSystem(vocab_size,
         num_relations, args.embedding_size, args.hidden_size, args.num_layers,
         args.dropout, args.init_weight_range, args.bidirectional, 
-        args.use_more_features, non_lin,
+        args.use_more_features, non_lin, gen_non_lin,
         args.predict_relations, args.generative,
         args.decompose_actions, args.stack_next,
         args.batch_size, args.cuda, model_path, True, args.late_reduce_oracle)
@@ -170,6 +171,7 @@ def score(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
   model_path = args.working_dir + '/' + args.save_model
   assert args.generative
   non_lin = args.non_lin #TODO better interface
+  gen_non_lin = args.gen_non_lin
 
   # Build the model
   assert args.arc_hybrid or args.arc_eager
@@ -178,14 +180,14 @@ def score(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
         num_relations, args.embedding_size, 
         args.hidden_size, args.num_layers, args.dropout,
         args.init_weight_range, args.bidirectional, 
-        args.use_more_features, non_lin,
+        args.use_more_features, non_lin, gen_non_lin,
         args.predict_relations, args.generative,
         args.decompose_actions, args.stack_next, args.batch_size, args.cuda, model_path, True)
   elif args.arc_eager:
     tr_system = arc_eager.ArcEagerTransitionSystem(vocab_size,
         num_relations, args.embedding_size, args.hidden_size, args.num_layers,
         args.dropout, args.init_weight_range, args.bidirectional, 
-        args.use_more_features, non_lin,
+        args.use_more_features, non_lin, gen_non_lin,
         args.predict_relations, args.generative,
         args.decompose_actions, args.stack_next, args.batch_size, args.cuda, model_path, True,
         args.late_reduce_oracle)
@@ -213,6 +215,7 @@ def train(args, sentences, dev_sentences, word_vocab, pos_vocab, rel_vocab):
   model_path = args.working_dir + '/' + args.save_model
   lr = args.lr
   non_lin = args.non_lin #TODO better interface
+  gen_non_lin = args.gen_non_lin
 
   # Build the model
   assert args.arc_hybrid or args.arc_eager
@@ -221,7 +224,7 @@ def train(args, sentences, dev_sentences, word_vocab, pos_vocab, rel_vocab):
         num_relations, args.embedding_size, 
         args.hidden_size, args.num_layers, args.dropout,
         args.init_weight_range, args.bidirectional, 
-        args.use_more_features, non_lin,
+        args.use_more_features, non_lin, gen_non_lin,
         args.predict_relations, args.generative,
         args.decompose_actions, args.stack_next, args.batch_size, args.cuda,
         model_path, False)
@@ -229,7 +232,7 @@ def train(args, sentences, dev_sentences, word_vocab, pos_vocab, rel_vocab):
     tr_system = arc_eager.ArcEagerTransitionSystem(vocab_size,
         num_relations, args.embedding_size, args.hidden_size, args.num_layers,
         args.dropout, args.init_weight_range, args.bidirectional, 
-        args.use_more_features, non_lin,
+        args.use_more_features, non_lin, gen_non_lin,
         args.predict_relations, args.generative,
         args.decompose_actions, args.stack_next, args.batch_size, args.cuda,
         model_path, False, args.late_reduce_oracle)
