@@ -381,6 +381,69 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
     return table[0, 0, sent_length]
 
 
+  def linear_oracle(self, conll, encoder_features):
+    # Oracle that shifts everything, then reduces.
+    stack = data_utils.ParseForest([])
+    buf = data_utils.ParseForest([conll[0]])
+    buffer_index = 0
+    sent_length = len(conll)
+
+    num_children = [0 for _ in conll]
+    for token in conll:
+      num_children[token.parent_id] += 1
+
+    actions = []
+    labels = []
+    words = []
+    features = []
+
+    while buffer_index < sent_length or len(stack) > 1:
+      feature = None
+      action = data_utils._SH
+      s0 = stack.roots[-1].id if len(stack) > 0 else 0
+      s1 = stack.roots[-2].id if len(stack) > 1 else 0
+      s2 = stack.roots[-3].id if len(stack) > 2 else 0
+
+      if len(stack) > 1: # allowed to ra or la
+        if buffer_index == sent_length:
+          action = data_utils._RA
+          
+      position = nn_utils.extract_feature_positions(buffer_index, s0, s1, s2,
+          self.more_context) 
+      feature = nn_utils.select_features(encoder_features, position, self.use_cuda)
+      features.append(feature)
+       
+      label = -1 if action == data_utils._SH else stack.roots[-1].relation_id
+      if action == data_utils._SH:
+        if buffer_index+1 < sent_length:
+          word = conll[buffer_index+1].word_id
+        else:
+          word = data_utils._EOS
+      else:
+        word = -1
+          
+      actions.append(action)
+      labels.append(label)
+      words.append(word)
+
+      # excecute action
+      if action == data_utils._SH:
+        stack.roots.append(buf.roots[0]) 
+        buffer_index += 1
+        if buffer_index == sent_length:
+          buf = data_utils.ParseForest([])
+        else:
+          buf = data_utils.ParseForest([conll[buffer_index]])
+      else:  
+        assert len(stack) > 0
+        child = stack.roots.pop()
+        if action == data_utils._LA:
+          buf.roots[0].children.append(child) 
+        else:
+          stack.roots[-1].children.append(child)
+    return actions, words, labels, features
+
+
   def oracle(self, conll, encoder_features):
     # Training oracle for single parsed sentence.
     stack = data_utils.ParseForest([])

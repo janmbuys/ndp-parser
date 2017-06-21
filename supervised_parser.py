@@ -265,6 +265,7 @@ def train(args, sentences, dev_sentences, word_vocab, pos_vocab, rel_vocab):
     random.shuffle(sentences)
     sentences.sort(key=len) 
 
+    batch_loss = None
     total_loss = 0 
     global_loss = 0 
     total_num_tokens = 0 
@@ -277,6 +278,8 @@ def train(args, sentences, dev_sentences, word_vocab, pos_vocab, rel_vocab):
 
       # sentence encoder
       sentence_data = nn_utils.get_sentence_data_batch([train_sent], args.cuda)
+
+      # if i % args.batch_size == 0: #TODO not sure about this
       tr_system.encoder_model.zero_grad()
       tr_system.transition_model.zero_grad()
       if args.predict_relations:
@@ -288,8 +291,12 @@ def train(args, sentences, dev_sentences, word_vocab, pos_vocab, rel_vocab):
       encoder_state = tr_system.encoder_model.init_hidden(batch_size)
       encoder_output = tr_system.encoder_model(sentence_data, encoder_state)
 
-      actions, words, labels, features = tr_system.oracle(
-          train_sent.conll, encoder_output)
+      if args.arc_hybrid and args.linear_oracle:
+        actions, words, labels, features = tr_system.linear_oracle(
+            train_sent.conll, encoder_output)
+      else:
+        actions, words, labels, features = tr_system.oracle(
+            train_sent.conll, encoder_output)
       
       if args.decompose_actions:
         stack_actions, directions = tr_system.decompose_transitions(actions)
@@ -366,12 +373,19 @@ def train(args, sentences, dev_sentences, word_vocab, pos_vocab, rel_vocab):
       total_num_tokens += len(train_sent) - 1 
       global_num_tokens += len(train_sent) - 1 
       if loss is not None:
-        loss.backward()
-        if args.grad_clip > 0: #TODO official gradient clipping
-           nn.utils.clip_grad_norm(params, args.grad_clip) #TODO no gradient
+        if batch_loss is None:
+          batch_loss = loss
+        else:
+          batch_loss += loss
+
+      if batch_loss is not None and (i + 1) % args.batch_size == 0:
+        batch_loss.backward()
+        if args.grad_clip > 0: 
+           nn.utils.clip_grad_norm(params, args.grad_clip) 
         optimizer.step() 
-        total_loss += loss.data
-        global_loss += loss.data
+        total_loss += batch_loss.data
+        global_loss += batch_loss.data
+        batch_loss = None
 
       if i % args.logging_interval == 0 and i > 0:
         cur_loss = total_loss[0] / total_num_tokens

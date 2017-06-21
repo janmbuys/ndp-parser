@@ -64,6 +64,8 @@ if __name__=='__main__':
                       help='Arc eager transition system')
   parser.add_argument('--late_reduce_oracle', action='store_true',
                       help='Arc eager late reduce oracle')
+  parser.add_argument('--linear_oracle', action='store_true',
+                      help='Shift-only baseline oracle')
 
   parser.add_argument('--embedding_size', type=int, default=128,
                       help='size of word embeddings')
