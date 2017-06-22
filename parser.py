@@ -41,6 +41,9 @@ if __name__=='__main__':
                       default=False)
   parser.add_argument('--reset_vocab', action='store_true', 
                       default=False)
+  parser.add_argument('--max_sentence_length', type=int, default=-1,
+                      help='maximum training sentence length')
+
   parser.add_argument('--decode', action='store_true', 
                       help='Only decode, assuming existing model', 
                       default=False)
@@ -134,8 +137,6 @@ if __name__=='__main__':
                       help='use CUDA')
   parser.add_argument('--seed', type=int, default=1111,
                       help='random seed')
-  parser.add_argument('--max_sentence_length', type=int, default=-1,
-                      help='maximum training sentence length')
   parser.add_argument('--small_data', action='store_true',
                       help='use small version of dataset')
   parser.add_argument('--logging_interval', type=int, default=5000, 
