@@ -411,7 +411,7 @@ def read_sentences_txt_fixed_vocab(txt_path, txt_name, working_path):
 
 
 def read_sentences_create_vocab(conll_path, conll_name, working_path,
-    projectify=False, use_unk_classes=False, replicate_rnng=False, 
+    projectify=False, use_unk_classes=True, replicate_rnng=False, 
     max_length=-1): 
   wordsCount = Counter()
   posCount = Counter()
@@ -472,7 +472,7 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path,
 
 
 def read_sentences_given_vocab(conll_path, conll_name, working_path,
-    projectify=False, use_unk_classes=False, replicate_rnng=False, 
+    projectify=False, use_unk_classes=True, replicate_rnng=False, 
     max_length=-1): 
   word_vocab = Vocab.read_count_vocab(working_path + 'vocab')
   form_vocab = word_vocab.form_vocab()

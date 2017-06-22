@@ -43,6 +43,8 @@ if __name__=='__main__':
                       default=False)
   parser.add_argument('--max_sentence_length', type=int, default=-1,
                       help='maximum training sentence length')
+  parser.add_argument('--no_unk_classes', action='store_true', 
+                      default=False)
 
   parser.add_argument('--decode', action='store_true', 
                       help='Only decode, assuming existing model', 
@@ -167,28 +169,31 @@ if __name__=='__main__':
   if vocab_path.is_file() and not args.reset_vocab:
     sentences, word_vocab, pos_vocab, rel_vocab = data_utils.read_sentences_given_vocab(
         data_path, args.train_name, data_working_path, projectify=True, 
+        use_unk_classes = not args.no_unk_classes,
         replicate_rnng=args.replicate_rnng_data,
         max_length=args.max_sentence_length)
   else:     
     print('Preparing vocab')
     sentences, word_vocab, pos_vocab, rel_vocab = data_utils.read_sentences_create_vocab(
         data_path, args.train_name, data_working_path, projectify=True, 
+        use_unk_classes = not args.no_unk_classes,
         replicate_rnng=args.replicate_rnng_data, 
         max_length=args.max_sentence_length)
+    data_utils.create_length_histogram(sentences, data_working_path)
 
   # Read dev and test files with given vocab
   dev_sentences, _, _, _ = data_utils.read_sentences_given_vocab(
         data_path, args.dev_name, data_working_path, projectify=False, 
+        use_unk_classes = not args.no_unk_classes,
         replicate_rnng=args.replicate_rnng_data)
 
   test_sentences, _,  _, _ = data_utils.read_sentences_given_vocab(
         data_path, args.test_name, data_working_path, projectify=False, 
+        use_unk_classes = not args.no_unk_classes,
         replicate_rnng=args.replicate_rnng_data)
 
-  data_utils.write_conll_baseline(data_path + 'dev.baseline.conll', 
-      [sent.conll for sent in dev_sentences])
-
-  #data_utils.create_length_histogram(sentences, args.working_dir)
+  #data_utils.write_conll_baseline(data_path + 'dev.baseline.conll', 
+  #    [sent.conll for sent in dev_sentences])
 
   if args.small_data:
     sentences = sentences[:200]
