@@ -66,7 +66,11 @@ if __name__=='__main__':
                       help='Arc eager late reduce oracle')
   parser.add_argument('--linear_oracle', action='store_true',
                       help='Shift-only baseline oracle')
-
+  
+  parser.add_argument('--pos_only', action='store_true',
+                      help='POS only')
+  parser.add_argument('--embed_only', action='store_true',
+                      help='Embed only, no RNN')
   parser.add_argument('--embedding_size', type=int, default=128,
                       help='size of word embeddings')
   parser.add_argument('--hidden_size', type=int, default=128, 
@@ -167,22 +171,26 @@ if __name__=='__main__':
     sentences, word_vocab, pos_vocab, rel_vocab = data_utils.read_sentences_given_vocab(
         data_path, args.train_name, data_working_path, projectify=True, 
         replicate_rnng=args.replicate_rnng_data,
+        pos_only=args.pos_only,
         max_length=args.max_sentence_length)
   else:     
     print('Preparing vocab')
     sentences, word_vocab, pos_vocab, rel_vocab = data_utils.read_sentences_create_vocab(
         data_path, args.train_name, data_working_path, projectify=True, 
         replicate_rnng=args.replicate_rnng_data, 
+        pos_only=args.pos_only,
         max_length=args.max_sentence_length)
 
   # Read dev and test files with given vocab
   dev_sentences, _, _, _ = data_utils.read_sentences_given_vocab(
         data_path, args.dev_name, data_working_path, projectify=False, 
-        replicate_rnng=args.replicate_rnng_data)
+        replicate_rnng=args.replicate_rnng_data,
+        pos_only=args.pos_only)
 
   test_sentences, _,  _, _ = data_utils.read_sentences_given_vocab(
         data_path, args.test_name, data_working_path, projectify=False, 
-        replicate_rnng=args.replicate_rnng_data)
+        replicate_rnng=args.replicate_rnng_data,
+        pos_only=args.pos_only)
 
   data_utils.write_conll_baseline(data_path + 'dev.baseline.conll', 
       [sent.conll for sent in dev_sentences])

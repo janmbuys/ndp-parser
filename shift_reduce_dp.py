@@ -10,6 +10,7 @@ from torch.autograd import Variable
 import classifier
 import binary_classifier
 import rnn_encoder
+import embed_encoder
 import nn_utils
 import data_utils
 
@@ -18,12 +19,16 @@ class ShiftReduceDP(nn.Module):
 
   def __init__(self, vocab_size, embedding_size, hidden_size, num_layers,
                dropout, init_weight_range, num_features, non_lin, gen_non_lin,
-               stack_next, use_cuda):
+               stack_next, embed_only, use_cuda):
     super(ShiftReduceDP, self).__init__()
     self.use_cuda = use_cuda
     self.stack_next = stack_next
-    self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, embedding_size, 
-        hidden_size, num_layers, dropout, init_weight_range, bidirectional=False, use_cuda=use_cuda)
+    if embed_only:
+      self.encoder_model = embed_encoder.EmbedEncoder(vocab_size, embedding_size, 
+          hidden_size, dropout, init_weight_range, use_cuda=use_cuda)
+    else:
+      self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, embedding_size, 
+          hidden_size, num_layers, dropout, init_weight_range, bidirectional=False, use_cuda=use_cuda)
 
     feature_size = hidden_size
     self.transition_model = binary_classifier.BinaryClassifier(num_features, 

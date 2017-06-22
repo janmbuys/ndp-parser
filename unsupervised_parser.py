@@ -53,7 +53,7 @@ def train(args, sentences, dev_sentences, word_vocab):
   stack_model = shift_reduce_dp.ShiftReduceDP(vocab_size, args.embedding_size,
       args.hidden_size, args.num_layers, args.dropout,
       args.init_weight_range, num_features, args.stack_next, non_lin,
-      gen_non_lin, args.cuda)
+      gen_non_lin, args.embed_only, args.cuda)
 
   if args.cuda:
     stack_model.cuda()

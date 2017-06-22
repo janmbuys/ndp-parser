@@ -315,7 +315,7 @@ def isProjOrder(sentence):
     return False, order
 
 
-def read_conll(fh, projectify, replicate_rnng=False):
+def read_conll(fh, projectify, replicate_rnng=False, pos_only=False):
   dropped = 0
   read = 0
   root = ConllEntry(0, '*root*', 'ROOT-POS', 'ROOT-CPOS', 0, 'rroot')
@@ -351,7 +351,11 @@ def read_conll(fh, projectify, replicate_rnng=False):
       tokens = [root]
       id = 0
     else:
-      tokens.append(ConllEntry(int(tok[0]), tok[1], tok[4], tok[3], 
+      if pos_only:
+        word = tok[4]
+      else:
+        word = tok[1]
+      tokens.append(ConllEntry(int(tok[0]), word, tok[4], tok[3], 
                                int(tok[6]) if tok[6] != '_' else -1, tok[7]))
   if len(tokens) > 1:
     yield tokens
@@ -406,7 +410,7 @@ def read_sentences_txt_fixed_vocab(txt_path, txt_name, working_path):
 
 
 def read_sentences_create_vocab(conll_path, conll_name, working_path,
-    projectify=False, replicate_rnng=False, max_length=-1): 
+    projectify=False, replicate_rnng=False, pos_only=False, max_length=-1): 
     #TODO add argument include_singletons=False
   wordsCount = Counter()
   posCount = Counter()
@@ -414,7 +418,7 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path,
 
   conll_sentences = []
   with open(conll_path + conll_name + '.conll', 'r') as conllFP:
-    for sentence in read_conll(conllFP, projectify, replicate_rnng):
+    for sentence in read_conll(conllFP, projectify, replicate_rnng, pos_only):
       #if max_length <= 0 or len(sentence) <= max_length:
       conll_sentences.append(sentence)
       wordsCount.update([node.form for node in sentence])
@@ -459,7 +463,7 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path,
 
 
 def read_sentences_given_vocab(conll_path, conll_name, working_path,
-    projectify=False, replicate_rnng=False, max_length=-1): 
+    projectify=False, replicate_rnng=False, pos_only=False, max_length=-1): 
   word_vocab = Vocab.read_count_vocab(working_path + 'vocab')
   form_vocab = word_vocab.form_vocab()
   pos_vocab = Vocab.read_vocab(working_path + 'pos.vocab')
@@ -467,7 +471,7 @@ def read_sentences_given_vocab(conll_path, conll_name, working_path,
 
   sentences = []
   with open(conll_path + conll_name + '.conll', 'r') as conllFP:
-    for sentence in read_conll(conllFP, projectify, replicate_rnng):
+    for sentence in read_conll(conllFP, projectify, replicate_rnng, pos_only):
       #if max_length <= 0 or len(sentence) <= max_length:
       for j, node in enumerate(sentence):
         if node.form not in form_vocab: 
