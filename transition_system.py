@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 import rnn_encoder
+import embed_encoder
 import classifier
 import binary_classifier
 
@@ -16,13 +17,14 @@ class TransitionSystem():
       num_indicators, num_gen_indicators, embedding_size, hidden_size, 
       num_layers, dropout, init_weight_range, bidirectional, non_lin, 
       gen_non_lin, predict_relations, generative, decompose_actions, 
-      stack_next, batch_size, use_cuda, model_path, load_model):
+      embed_only, stack_next, batch_size, use_cuda, model_path, load_model):
     self.use_cuda = use_cuda
     self.vocab_size = vocab_size
     self.decompose_actions = decompose_actions
     self.predict_relations = predict_relations
     self.generative = generative
     self.stack_next = stack_next
+    self.embed_only = embed_only
     self.num_features = num_features
     self.num_relations = num_relations
     self.num_transitions = num_transitions
@@ -59,9 +61,14 @@ class TransitionSystem():
         self.direction_model = None
 
     else: 
-      self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, 
-          embedding_size, hidden_size, num_layers, dropout, init_weight_range,
-          bidirectional=bidirectional, use_cuda=use_cuda)
+      if embed_only:
+        self.encoder_model = embed_encoder.EmbedEncoder(vocab_size, 
+            embedding_size, hidden_size, dropout, init_weight_range,
+            use_cuda=use_cuda)
+      else:
+        self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, 
+            embedding_size, hidden_size, num_layers, dropout, init_weight_range,
+            bidirectional=bidirectional, use_cuda=use_cuda)
         
       if decompose_actions:
         self.transition_model = binary_classifier.BinaryClassifier(num_features, 

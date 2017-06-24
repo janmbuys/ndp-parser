@@ -84,9 +84,10 @@ def training_decode(args, tr_system, val_sentences, rel_vocab, epoch=-1):
 
       if args.predict_relations:
         relation_output, label_var = nn_utils.filter_logits(relation_logits, labels, use_cuda=args.cuda)
-        if relation_output is not None:
-          total_loss += criterion(relation_output.view(-1, tr_system.num_relations),
-                                  label_var).data
+        # For now, don't include in scoring
+        #if relation_output is not None:
+        #  total_loss += criterion(relation_output.view(-1, tr_system.num_relations),
+        #                          label_var).data
 
   working_path = args.working_dir + '/'
   file_id = '.' + str(epoch) if epoch >= 0 else ''
@@ -137,7 +138,8 @@ def decode(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
         args.init_weight_range, args.bidirectional, 
         args.use_more_features, non_lin, gen_non_lin,
         args.predict_relations, args.generative,
-        args.decompose_actions, args.stack_next,
+        args.decompose_actions, args.embed_only,
+        args.stack_next,
         args.batch_size, args.cuda, model_path, True)
   elif args.arc_eager:
     tr_system = arc_eager.ArcEagerTransitionSystem(vocab_size,
@@ -145,7 +147,7 @@ def decode(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
         args.dropout, args.init_weight_range, args.bidirectional, 
         args.use_more_features, non_lin, gen_non_lin,
         args.predict_relations, args.generative,
-        args.decompose_actions, args.stack_next,
+        args.decompose_actions, args.embed_only, args.stack_next,
         args.batch_size, args.cuda, model_path, True, args.late_reduce_oracle)
 
   print('Done loading models')
@@ -182,14 +184,16 @@ def score(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
         args.init_weight_range, args.bidirectional, 
         args.use_more_features, non_lin, gen_non_lin,
         args.predict_relations, args.generative,
-        args.decompose_actions, args.stack_next, args.batch_size, args.cuda, model_path, True)
+        args.decompose_actions, args.embed_only, args.stack_next, 
+        args.batch_size, args.cuda, model_path, True)
   elif args.arc_eager:
     tr_system = arc_eager.ArcEagerTransitionSystem(vocab_size,
         num_relations, args.embedding_size, args.hidden_size, args.num_layers,
         args.dropout, args.init_weight_range, args.bidirectional, 
         args.use_more_features, non_lin, gen_non_lin,
         args.predict_relations, args.generative,
-        args.decompose_actions, args.stack_next, args.batch_size, args.cuda, model_path, True,
+        args.decompose_actions, args.embed_only, args.stack_next, 
+        args.batch_size, args.cuda, model_path, True,
         args.late_reduce_oracle)
 
   print('Done loading models')
@@ -226,16 +230,16 @@ def train(args, sentences, dev_sentences, word_vocab, pos_vocab, rel_vocab):
         args.init_weight_range, args.bidirectional, 
         args.use_more_features, non_lin, gen_non_lin,
         args.predict_relations, args.generative,
-        args.decompose_actions, args.stack_next, args.batch_size, args.cuda,
-        model_path, False)
+        args.decompose_actions, args.embed_only, args.stack_next, 
+        args.batch_size, args.cuda, model_path, False)
   elif args.arc_eager:
     tr_system = arc_eager.ArcEagerTransitionSystem(vocab_size,
         num_relations, args.embedding_size, args.hidden_size, args.num_layers,
         args.dropout, args.init_weight_range, args.bidirectional, 
         args.use_more_features, non_lin, gen_non_lin,
         args.predict_relations, args.generative,
-        args.decompose_actions, args.stack_next, args.batch_size, args.cuda,
-        model_path, False, args.late_reduce_oracle)
+        args.decompose_actions, args.embed_only, args.stack_next, 
+        args.batch_size, args.cuda, model_path, False, args.late_reduce_oracle)
 
   criterion = nn.CrossEntropyLoss(size_average=False)
   binary_criterion = nn.BCELoss(size_average=False)

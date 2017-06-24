@@ -18,8 +18,8 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
   def __init__(self, vocab_size, num_relations,
       embedding_size, hidden_size, num_layers, dropout, init_weight_range, 
       bidirectional, more_context, non_lin, gen_non_lin,
-      predict_relations, generative, 
-      decompose_actions, stack_next, batch_size, use_cuda, model_path, 
+      predict_relations, generative, decompose_actions, embed_only, 
+      stack_next, batch_size, use_cuda, model_path, 
       load_model, late_reduce_oracle):
     assert not decompose_actions and not more_context
     num_transitions = 3
@@ -27,9 +27,8 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     super(ArcEagerTransitionSystem, self).__init__(vocab_size, num_relations,
         num_features, num_transitions, 1, 2, embedding_size, hidden_size, 
         num_layers, dropout, init_weight_range, bidirectional, non_lin,
-        gen_non_lin,
-        predict_relations, generative, decompose_actions, stack_next,
-        batch_size, use_cuda, model_path, load_model)
+        gen_non_lin, predict_relations, generative, decompose_actions, 
+        embed_only, stack_next, batch_size, use_cuda, model_path, load_model)
     self.more_context = False
     self.generate_actions = [data_utils._SH, data_utils._RA]
     self.late_reduce_oracle = late_reduce_oracle
@@ -74,7 +73,6 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     return nactions 
 
   def decompose_transitions(self, actions):
-    # Note: Don't actually do this now.
     stackops = []
     arcops = []
     
@@ -87,10 +85,10 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
         arcops.append(data_utils._LRA)
       elif action == data_utils._LA:
         stackops.append(data_utils._SRE)
-        arcops.append(data_utils._ULA)
+        arcops.append(None) # data_utils._ULA)
       else:
         stackops.append(data_utils._SRE)
-        arcops.append(data_utils._URE)
+        arcops.append(None) # data_utils._URE)
    
     return stackops, arcops
 
