@@ -120,9 +120,9 @@ class Vocab:
     with open(fn, 'w') as fh:
       for i, word in enumerate(self.words):
         if i == 0 and add_eos:
-          fh.write(word + ' 0\n')
+          fh.write(word + '\t0\n')
         else:  
-          fh.write(word + ' ' + str(self.counts[word]) + '\n')
+          fh.write(word + '\t' + str(self.counts[word]) + '\n')
 
   @classmethod
   def from_counter(cls, counter, add_eos=False):
@@ -138,7 +138,7 @@ class Vocab:
     with open(fn, 'r') as fh:
       word_list = []
       for line in fh:
-        entry = line.strip().split(' ')
+        entry = line.rstrip('\n').split('\t')
         word_list.append(entry[0])
     return cls(word_list)
 
@@ -148,7 +148,8 @@ class Vocab:
       word_list = []
       dic = {}
       for line in fh:
-        entry = line.strip().split(' ')
+        entry = line[:-1].rstrip('\n').split('\t')
+        assert len(entry) >= 2, line
         word_list.append(entry[0])
         dic[entry[0]] = int(entry[1])
     return cls(word_list, Counter(dic))
@@ -165,12 +166,12 @@ def create_length_histogram(sentences, working_path):
     missing_token_count += min(len(sent), 50)
   lengths = list(sent_length.keys())
   lengths.sort()
-  print('Token count %d. length 50 count %d prop %.4f.'
+  print('Num Tokens: %d. Num <= 50: %d (%.2f percent).'
         % (token_count, missing_token_count,
-            missing_token_count/token_count))
+            missing_token_count*100/token_count))
 
   cum_count = 0
-  with open(working_path + '/histogram', 'w') as fh:
+  with open(working_path + 'train.histogram', 'w') as fh:
     for length in lengths:
       cum_count += sent_length[length]
       fh.write((str(length) + '\t' + str(sent_length[length]) + '\t' 
@@ -317,16 +318,19 @@ def isProjOrder(sentence):
 
 def read_conll(fh, projectify, replicate_rnng=False, pos_only=False):
   dropped = 0
+  non_proj = 0
   read = 0
   root = ConllEntry(0, '*root*', 'ROOT-POS', 'ROOT-CPOS', 0, 'rroot')
   tokens = [root]
   for line in fh:
-    tok = line.strip().split()
-    if not tok:
+    line = line.rstrip('\n')
+    if not line:
       if len(tokens)>1:
         is_proj = True
         if projectify:
           is_proj, order = isProjOrder(tokens)
+          if not is_proj:
+            non_proj += 1
           # Don't drop projective, modify to make projective
           while not is_proj:
             for i in range(1, len(order)):
@@ -337,20 +341,18 @@ def read_conll(fh, projectify, replicate_rnng=False, pos_only=False):
                 break
             is_proj, order = isProjOrder(tokens)
             if not is_proj and grandparent_id == 0:
-              print("Cannot fix")
+              #print("Cannot fix")
               break
 
         if (not (replicate_rnng and tokens[0].form == '#') and is_proj):
           yield tokens
         else:
-          #print(' '.join(toke.form for toke in tokens))
-          #print(' '.join(str(toke.parent_id) for toke in tokens))
-          print('Non-projective sentence dropped')
           dropped += 1
         read += 1
       tokens = [root]
       id = 0
     else:
+      tok = line.split('\t')
       if pos_only:
         word = tok[4]
       else:
@@ -360,7 +362,10 @@ def read_conll(fh, projectify, replicate_rnng=False, pos_only=False):
   if len(tokens) > 1:
     yield tokens
 
-  #print('%d dropped non-projective sentences.' % dropped)
+  if dropped > 0: 
+    print('%d dropped non-projective sentences.' % dropped)
+  print('%d non-projective sentences. (%.2f percent) ' % 
+      (non_proj, non_proj*100/read))
   print('%d sentences read.' % read)
 
 def read_sentences_txt_given_fixed_vocab(txt_path, txt_name, working_path):
@@ -410,8 +415,8 @@ def read_sentences_txt_fixed_vocab(txt_path, txt_name, working_path):
 
 
 def read_sentences_create_vocab(conll_path, conll_name, working_path,
-    projectify=False, replicate_rnng=False, pos_only=False, max_length=-1): 
-    #TODO add argument include_singletons=False
+    projectify=False, use_unk_classes=True, replicate_rnng=False, 
+    pos_only=False, max_length=-1): 
   wordsCount = Counter()
   posCount = Counter()
   relCount = Counter()
@@ -427,20 +432,27 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path,
 
   # For words, replace singletons with Berkeley UNK classes
   singletons = set(filter(lambda w: wordsCount[w] == 1, wordsCount.keys()))
-  print(str(len(singletons)) + ' singletons')
   form_vocab = set(filter(lambda w: wordsCount[w] > 1, wordsCount.keys()))   
 
   wordsNormCount = Counter()
   for i, sentence in enumerate(conll_sentences):
     for j, node in enumerate(sentence):
       if node.form in singletons:
-        conll_sentences[i][j].norm = map_unk_class(node.form, j==1, 
-            form_vocab, replicate_rnng)
+        if use_unk_classes:
+          conll_sentences[i][j].norm = map_unk_class(node.form, j==1, 
+              form_vocab, replicate_rnng)
+        else:
+          conll_sentences[i][j].norm = 'UNK'
     wordsNormCount.update([node.norm for node in conll_sentences[i]])
                              
   word_vocab = Vocab.from_counter(wordsNormCount, add_eos=True)
   pos_vocab = Vocab.from_counter(posCount)
   rel_vocab = Vocab.from_counter(relCount)
+
+  print(str(len(singletons)) + ' singletons')
+  print('Word vocab size %d' % len(word_vocab))
+  print('POS vocab size %d' % len(pos_vocab))
+  print('Relation vocab size %d' % len(rel_vocab))
 
   word_vocab.write_count_vocab(working_path + 'vocab', add_eos=True)
   pos_vocab.write_vocab(working_path + 'pos.vocab')
@@ -455,6 +467,7 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path,
         max_length))
 
   write_text(working_path + conll_name + '.txt', parse_sentences)
+  write_conll_gold_norm(working_path + conll_name + '.conll', conll_sentences)
 
   return (parse_sentences,
           word_vocab,
@@ -463,20 +476,26 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path,
 
 
 def read_sentences_given_vocab(conll_path, conll_name, working_path,
-    projectify=False, replicate_rnng=False, pos_only=False, max_length=-1): 
+    projectify=False, use_unk_classes=True, replicate_rnng=False, 
+    pos_only=False, max_length=-1): 
   word_vocab = Vocab.read_count_vocab(working_path + 'vocab')
   form_vocab = word_vocab.form_vocab()
   pos_vocab = Vocab.read_vocab(working_path + 'pos.vocab')
   rel_vocab = Vocab.read_vocab(working_path + 'rel.vocab')
 
   sentences = []
+  conll_sentences = []
   with open(conll_path + conll_name + '.conll', 'r') as conllFP:
     for sentence in read_conll(conllFP, projectify, replicate_rnng, pos_only):
       #if max_length <= 0 or len(sentence) <= max_length:
+      conll_sentences.append(sentence)
       for j, node in enumerate(sentence):
         if node.form not in form_vocab: 
-          sentence[j].norm = map_unk_class(node.form, j==1, form_vocab,
-                                           replicate_rnng)
+          if use_unk_classes:
+            sentence[j].norm = map_unk_class(node.form, j==1, form_vocab,
+                                             replicate_rnng)
+          else:
+            sentence[j].norm = 'UNK'
         sentence[j].relation_id = rel_vocab.get_id(node.relation) 
         sentence[j].word_id = word_vocab.get_id(sentence[j].norm)
       sentences.append(ParseSentence.from_vocab_conll(sentence, word_vocab,
@@ -486,6 +505,7 @@ def read_sentences_given_vocab(conll_path, conll_name, working_path,
   txt_path = Path(txt_filename)
   if not txt_path.is_file():
     write_text(txt_filename, sentences)
+    write_conll_gold_norm(working_path + conll_name + '.conll', conll_sentences)
 
   return (sentences,
           word_vocab,
@@ -505,6 +525,15 @@ def write_conll_baseline(fn, conll_gen):
           fh.write('\t'.join([str(entry.id), entry.form, '_', entry.cpos,
             entry.pos, '_', str(pred_parent), '_', '_', '_']))
           fh.write('\n')
+      fh.write('\n')
+
+
+def write_conll_gold_norm(fn, conll_gen):
+  with open(fn, 'w') as fh:
+    for sentence in conll_gen:
+      for entry in sentence[1:]:
+        fh.write('\t'.join([str(entry.id), entry.norm, '_', entry.cpos, entry.pos, '_', str(entry.parent_id), entry.relation, '_', '_']))
+        fh.write('\n')
       fh.write('\n')
 
 
