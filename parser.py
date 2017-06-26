@@ -204,9 +204,9 @@ if __name__=='__main__':
   #    [sent.conll for sent in dev_sentences])
 
   if args.small_data:
-    sentences = sentences[:200]
+    sentences = sentences[:2]
     #dev_sentences = dev_sentences
-    dev_sentences = dev_sentences[:200]
+    dev_sentences = dev_sentences[:5]
 
   val_sentences = test_sentences if args.test else dev_sentences
   if args.unsup:

@@ -113,7 +113,7 @@ class ShiftReduceDP(nn.Module):
       for j in range(i+1, min(sent_length, i + max_dependency_length)):
         index = get_feature_index(i, j)
         table[i, j, j+1] = (torch.log1p(-re_probs_list[index]) 
-                            + word_distr_list[index, word_ids[j+1]])
+            + word_distr_list[index, word_ids[j if self.stack_next else j+1]])
  
     for gap in range(2, sent_length+1):
       #print(gap)
@@ -286,7 +286,6 @@ class ShiftReduceDP(nn.Module):
     eps = np.exp(-10) # used to avoid division by 0
 
     # compute all sh/re and word probabilities
-    seq_length = sent_length + 1
     reduce_probs = np.zeros([seq_length, seq_length])
     word_log_probs = np.empty([sent_length, sent_length])
     word_log_probs.fill(-np.inf)
@@ -300,7 +299,7 @@ class ShiftReduceDP(nn.Module):
     for i in range(seq_length-1):
       for j in range(i+1, seq_length):
         reduce_probs[i, j] = re_probs_list[counter, 0]
-        if self.word_model is not None and j < sent_length:
+        if j < sent_length:
           word_log_probs[i, j] = nn_utils.to_numpy(
               word_distr_list[counter, word_ids[j if self.stack_next else j+1]])
         counter += 1
@@ -315,7 +314,7 @@ class ShiftReduceDP(nn.Module):
       table[0, 0, 1] = 0
     else:
       init_features = nn_utils.select_features(encoder_features, [0, 0], 
-                                             self.use_cuda)
+                                               self.use_cuda)
       init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
       table[0, 0, 1] = nn_utils.to_numpy(init_word_distr[word_ids[1]])
 
