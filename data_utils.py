@@ -149,6 +149,8 @@ class Vocab:
       dic = {}
       for line in fh:
         entry = line[:-1].rstrip('\n').split('\t')
+        if len(entry) < 2:
+          entry = line[:-1].strip().split()
         assert len(entry) >= 2, line
         word_list.append(entry[0])
         dic[entry[0]] = int(entry[1])
