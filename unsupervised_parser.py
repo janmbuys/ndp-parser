@@ -25,16 +25,16 @@ def training_decode(val_sentences, stack_model, word_vocab, output_fn, max_sents
       sentence_data = nn_utils.get_sentence_data_batch([val_sent], use_cuda,
           evaluation=True)
       transition_logits, actions, buffer_shift_dependents, stack_shift_dependents = stack_model.forward(sentence_data)
-      action_str =  ' '.join(['SH' if act == data_utils._SH else 'RE' for act in actions])
+      action_str = ' '.join(['SH' if act == data_utils._SH else 'RE' for act in actions])
       fh.write('# ' + action_str + '\n')
       for i, entry in enumerate(val_sent.conll):
         if i > 0:
-          if stack_model.stack_next:
-            pred_parent = stack_shift_dependents[i]
-          else:
-            pred_parent = buffer_shift_dependents[i]
+          #if stack_model.stack_next:
+          pred_parent = stack_shift_dependents[i]
+          #else:
+          #  pred_parent = buffer_shift_dependents[i]
           fh.write('\t'.join([str(entry.id), entry.form, '_', 
-            str(buffer_shift_dependents[i]), str(stack_shift_dependents[i]),
+            entry.cpos, entry.pos, 
             '_', str(pred_parent), '_', '_', '_']) + '\n')
       fh.write('\n')
   print('decode time {:2.2f}s'.format(time.time() - decode_start_time))
@@ -59,8 +59,8 @@ def train(args, sentences, dev_sentences, word_vocab):
   else:
     stack_model = shift_reduce_dp.ShiftReduceDP(vocab_size, args.embedding_size,
       args.hidden_size, args.num_layers, args.dropout,
-      args.init_weight_range, num_features, args.stack_next, non_lin,
-      gen_non_lin, args.embed_only, args.cuda)
+      args.init_weight_range, num_features, non_lin,
+      gen_non_lin, args.stack_next, args.embed_only, args.cuda)
 
   if args.cuda:
     stack_model.cuda()

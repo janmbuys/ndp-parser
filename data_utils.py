@@ -498,8 +498,15 @@ def read_sentences_given_vocab(conll_path, conll_name, working_path,
                                              replicate_rnng)
           else:
             sentence[j].norm = 'UNK'
-        sentence[j].relation_id = rel_vocab.get_id(node.relation) 
-        sentence[j].word_id = word_vocab.get_id(sentence[j].norm)
+        if node.relation in rel_vocab.dic:
+          sentence[j].relation_id = rel_vocab.get_id(node.relation) 
+        else: # back off to most frequent relation 
+          sentence[j].relation_id = 0
+        if sentence[j].norm in word_vocab.dic:
+          sentence[j].word_id = word_vocab.get_id(sentence[j].norm)
+        else: # back off to least frequent word
+          sentence[j].word_id = len(word_vocab) - 1
+          sentence[j].norm = word_vocab.get_word(sentence[j].word_id)
       sentences.append(ParseSentence.from_vocab_conll(sentence, word_vocab,
         max_length))
 
