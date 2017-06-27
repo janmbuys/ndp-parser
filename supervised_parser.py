@@ -92,6 +92,7 @@ def training_decode(args, tr_system, val_sentences, rel_vocab, epoch=-1):
   working_path = args.working_dir + '/'
   file_id = '.' + str(epoch) if epoch >= 0 else ''
   data_utils.write_conll(working_path + args.dev_name + file_id + '.output.conll', conll_predicted)
+  # this loss is with respect to the selected parse
   return total_loss, total_length, total_length_more
 
 

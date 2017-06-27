@@ -181,6 +181,17 @@ def create_length_histogram(sentences, working_path):
   print('Created histogram')   
 
 
+def transition_to_str(action):
+  if action == _SH:
+    return 'SH'
+  elif action == _LA:
+    return 'LA'
+  elif action == _RA:
+    return 'RA'
+  elif action == _RE:
+    return 'RE'
+
+
 # Stanford/Berkeley parser UNK processing case 5 (English specific).
 # Source class: edu.berkeley.nlp.PCFGLA.SimpleLexicon
 def map_unk_class(word, is_sent_start, vocab, replicate_rnng=False):
@@ -372,7 +383,6 @@ def read_conll(fh, projectify, replicate_rnng=False, pos_only=False):
 
 def read_sentences_txt_given_fixed_vocab(txt_path, txt_name, working_path):
   word_vocab = Vocab.read_count_vocab(working_path + 'vocab')
-  form_vocab = word_vocab.form_vocab()
 
   print('reading')
   sentences = []
@@ -383,7 +393,7 @@ def read_sentences_txt_given_fixed_vocab(txt_path, txt_name, working_path):
       for word in line.split():
         tokens.append(ConllEntry(len(tokens), word, '_', '_'))
       for j, node in enumerate(tokens):
-        assert node.form in form_vocab
+        assert node.form in word_vocab
         tokens[j].word_id = word_vocab.get_id(node.form)   
       sentences.append(ParseSentence.from_vocab_conll(tokens, word_vocab))
 
@@ -477,7 +487,7 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path,
           rel_vocab)
 
 
-def read_sentences_given_vocab(conll_path, conll_name, working_path,
+def read_sentences_given_vocab(conll_path, conll_name, working_path, 
     projectify=False, use_unk_classes=True, replicate_rnng=False, 
     pos_only=False, max_length=-1): 
   word_vocab = Vocab.read_count_vocab(working_path + 'vocab')
@@ -515,6 +525,29 @@ def read_sentences_given_vocab(conll_path, conll_name, working_path,
   if not txt_path.is_file():
     write_text(txt_filename, sentences)
     write_conll_gold_norm(working_path + conll_name + '.conll', conll_sentences)
+
+  return (sentences,
+          word_vocab,
+          pos_vocab,
+          rel_vocab)
+
+
+def read_sentences_given_fixed_vocab(conll_name, working_path, max_length=-1): 
+  word_vocab = Vocab.read_count_vocab(working_path + 'vocab')
+  pos_vocab = Vocab.read_vocab(working_path + 'pos.vocab')
+  rel_vocab = Vocab.read_vocab(working_path + 'rel.vocab')
+
+  sentences = []
+  conll_sentences = []
+  with open(working_path + conll_name + '.conll', 'r') as conllFP:
+    for sentence in read_conll(conllFP, False, False, False):
+      conll_sentences.append(sentence)
+      for j, node in enumerate(sentence):
+        #assert node.form in word_vocab.dic, node.form + " not in vocab"
+        sentence[j].relation_id = rel_vocab.get_id(node.relation) 
+        sentence[j].word_id = word_vocab.get_id(sentence[j].norm)
+      sentences.append(ParseSentence.from_vocab_conll(sentence, word_vocab,
+        max_length))
 
   return (sentences,
           word_vocab,

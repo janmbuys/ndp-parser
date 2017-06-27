@@ -144,15 +144,19 @@ class ShiftReduceDP(nn.Module):
     # dim [num_pairs, batch_size, 2, state_size]
     features = nn_utils.batch_feature_selection(encoder_features, seq_length,
         self.use_cuda, stack_next=self.stack_next)
+    rev_features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+        self.use_cuda, rev=True, stack_next=self.stack_next)
+
     #print(features)
     num_pairs = features.size()[0]
 
-    # dim [num_pairs*batch_size, output_size] -> break dim
-    re_probs_list = self.binary_normalize(self.transition_model(features)).view(num_pairs, batch_size)
     eps = nn_utils.to_var(torch.FloatTensor(num_pairs, batch_size).fill_(
         np.exp(-10)), self.use_cuda)
-    re_log_probs_list = torch.log(re_probs_list+eps)
+    # dim [num_pairs*batch_size, output_size] -> break dim
+    re_probs_list = self.binary_normalize(self.transition_model(features)).view(num_pairs, batch_size)
     sh_log_probs_list = torch.log1p(-re_probs_list+eps)
+    re_rev_probs_list = self.binary_normalize(self.transition_model(rev_features)).view(num_pairs, batch_size)
+    re_rev_log_probs_list = torch.log(re_rev_probs_list+eps)
 
     word_distr_list = self.log_normalize(self.word_model(features)).view(num_pairs, batch_size, -1) 
 
@@ -195,30 +199,39 @@ class ShiftReduceDP(nn.Module):
       # dim [batch_size x vocab_size]
       init_word_distr = self.log_normalize(self.word_model(init_features))
       table[0, 0, 1] = torch.gather(init_word_distr, 1, sentence[1].view(-1, 1))
+   
     for i in range(sent_length-1): 
-      start_index = get_feature_index(i, i+1)
-      end_index = get_feature_index(i, sent_length-1) + 1
-      
-      word_probs = nn_utils.to_var(torch.FloatTensor(sent_length - (i + 1),
-          batch_size).fill_(-np.inf), self.use_cuda)
-
       for j in range(i+1, sent_length):
         index = get_feature_index(i, j)
-        word_probs[j - (i + 1)] = torch.gather(word_distr_list[index], 1,
+        word_prob = torch.gather(word_distr_list[index], 1,
             sentence[j if self.stack_next else j+1].view(-1, 1))
-      sh_probs = sh_log_probs_list[start_index:end_index] + word_probs
+        table[i, j, j+1] = sh_log_probs_list[index] + word_prob
 
-      # Cannot do scatter asign to table directly
-      word_table = nn_utils.to_var(torch.FloatTensor(sent_length - (i+1), 
-          sent_length - i, batch_size).fill_(-np.inf), self.use_cuda)
+    if False: # More complicated, not faster
+      for i in range(sent_length-1): 
+        start_index = get_feature_index(i, i+1)
+        end_index = get_feature_index(i, sent_length-1) + 1
+        
+        word_probs = nn_utils.to_var(torch.FloatTensor(sent_length - (i + 1),
+            batch_size).fill_(-np.inf), self.use_cuda)
 
-      # Indexing for scatter asignment.
-      range_var = nn_utils.to_var(torch.LongTensor(range(1, 
-          sent_length-i)).view(-1, 1).repeat(1, batch_size), self.use_cuda)
-      
-      word_table.scatter_(1, range_var.view(-1, 1, batch_size), 
-          sh_probs.view(-1, 1, batch_size))
-      table[i, i+1:sent_length, i+1:sent_length+1] = word_table
+        for j in range(i+1, sent_length):
+          index = get_feature_index(i, j)
+          word_probs[j - (i + 1)] = torch.gather(word_distr_list[index], 1,
+              sentence[j if self.stack_next else j+1].view(-1, 1))
+        sh_probs = sh_log_probs_list[start_index:end_index] + word_probs
+
+        # Cannot do scatter asign to table directly
+        word_table = nn_utils.to_var(torch.FloatTensor(sent_length - (i+1), 
+            sent_length - i, batch_size).fill_(-np.inf), self.use_cuda)
+
+        # Indexing for scatter asignment.
+        range_var = nn_utils.to_var(torch.LongTensor(range(1, 
+            sent_length-i)).view(-1, 1).repeat(1, batch_size), self.use_cuda)
+        
+        word_table.scatter_(1, range_var.view(-1, 1, batch_size), 
+            sh_probs.view(-1, 1, batch_size))
+        table[i, i+1:sent_length, i+1:sent_length+1] = word_table
 
     for gap in range(2, sent_length+1):
       for i in range(sent_length+1-gap):
@@ -226,14 +239,14 @@ class ShiftReduceDP(nn.Module):
         start_ind = get_rev_feature_index(i+1, j)
         end_ind = get_rev_feature_index(j-1, j) + 1
               
-        # Super vectorization
-        all_block_scores = (table[0:max(i, 1), i, i+1:j]
-            + table[i, i+1:j, j].expand(max(i, 1), gap - 1, batch_size)
-            + re_log_probs_list[start_ind:end_ind].view(
-                1, -1, batch_size).expand(max(i, 1), gap - 1, batch_size))
+        # Super vectorization 
+        re_probs = re_rev_log_probs_list[start_ind:end_ind]
+        temp_right = table[i, i+1:j, j] + re_probs.view(1, -1, batch_size)
+        all_block_scores = (table[0:max(i, 1), i, i+1:j] 
+                            + temp_right.expand(max(i, 1), gap - 1, batch_size))
         table[0:max(i, 1), i, j] = nn_utils.log_sum_exp(all_block_scores, 1)
      
-    final_score = re_log_probs_list[get_feature_index(0, sent_length)]
+    final_score = re_rev_log_probs_list[get_rev_feature_index(0, sent_length)]
     return table[0, 0, sent_length] + final_score
 
   def _decode_action_sequence(self, encoder_features, word_ids, actions):
@@ -277,7 +290,7 @@ class ShiftReduceDP(nn.Module):
         child = stack.pop()
         reduce_dependents[child] = buffer_index
         
-    return transition_logits, actions, buffer_shift_dependents, stack_shift_dependents
+    return transition_logits, actions, stack_shift_dependents
 
 
   def _viterbi_algorithm(self, encoder_features, word_ids):

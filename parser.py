@@ -170,43 +170,25 @@ if __name__=='__main__':
 
   # Prepare training data
   vocab_path = Path(data_working_path + 'vocab')
-  if vocab_path.is_file() and not args.reset_vocab:
-    sentences, word_vocab, pos_vocab, rel_vocab = data_utils.read_sentences_given_vocab(
-        data_path, args.train_name, data_working_path, projectify=True, 
-        use_unk_classes = not args.no_unk_classes,
-        replicate_rnng=args.replicate_rnng_data,
-        pos_only=args.pos_only,
-        max_length=args.max_sentence_length)
-  else:     
-    print('Preparing vocab')
-    sentences, word_vocab, pos_vocab, rel_vocab = data_utils.read_sentences_create_vocab(
-        data_path, args.train_name, data_working_path, projectify=True, 
-        use_unk_classes = not args.no_unk_classes,
-        replicate_rnng=args.replicate_rnng_data, 
-        pos_only=args.pos_only,
-        max_length=args.max_sentence_length)
-    data_utils.create_length_histogram(sentences, data_working_path)
+  assert vocab_path.is_file(), 'Missing vocab file: Data have to be processed first'
+
+  print('Preparing data')
+  sentences, word_vocab, pos_vocab, rel_vocab = data_utils.read_sentences_given_fixed_vocab(
+      args.train_name, data_working_path, max_length=args.max_sentence_length)
 
   # Read dev and test files with given vocab
-  dev_sentences, _, _, _ = data_utils.read_sentences_given_vocab(
-        data_path, args.dev_name, data_working_path, projectify=False, 
-        use_unk_classes = not args.no_unk_classes,
-        replicate_rnng=args.replicate_rnng_data,
-        pos_only=args.pos_only)
+  dev_sentences, _, _, _ = data_utils.read_sentences_given_fixed_vocab(
+      args.dev_name, data_working_path, max_length=args.max_sentence_length)
 
-  test_sentences, _,  _, _ = data_utils.read_sentences_given_vocab(
-        data_path, args.test_name, data_working_path, projectify=False, 
-        use_unk_classes = not args.no_unk_classes,
-        replicate_rnng=args.replicate_rnng_data,
-        pos_only=args.pos_only)
+  test_sentences, _,  _, _ = data_utils.read_sentences_given_fixed_vocab(
+      args.test_name, data_working_path, max_length=args.max_sentence_length)
 
   #data_utils.write_conll_baseline(data_path + 'dev.baseline.conll', 
   #    [sent.conll for sent in dev_sentences])
 
   if args.small_data:
-    sentences = sentences[:2]
-    #dev_sentences = dev_sentences
-    dev_sentences = dev_sentences[:5]
+    sentences = sentences[:100]  #temp: get no training baseline 
+    dev_sentences = dev_sentences[:100]
 
   val_sentences = test_sentences if args.test else dev_sentences
   if args.unsup:

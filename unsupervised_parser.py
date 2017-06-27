@@ -15,28 +15,32 @@ import nn_utils
 import shift_reduce_dp
 import arc_eager_dp
 
-def training_decode(val_sentences, stack_model, word_vocab, output_fn, max_sents=-1, use_cuda=False):
+def training_decode(val_sentences, stack_model, word_vocab, conll_output_fn,
+        transition_output_fn, max_sents=-1, use_cuda=False):
   stack_model.eval()
   decode_start_time = time.time()
-  with open(output_fn, 'w') as fh:
-    for i, val_sent in enumerate(val_sentences):
-      if max_sents > 0 and i > max_sents:
-        break
-      sentence_data = nn_utils.get_sentence_data_batch([val_sent], use_cuda,
-          evaluation=True)
-      transition_logits, actions, buffer_shift_dependents, stack_shift_dependents = stack_model.forward(sentence_data)
-      action_str = ' '.join(['SH' if act == data_utils._SH else 'RE' for act in actions])
-      fh.write('# ' + action_str + '\n')
-      for i, entry in enumerate(val_sent.conll):
-        if i > 0:
-          #if stack_model.stack_next:
-          pred_parent = stack_shift_dependents[i]
-          #else:
-          #  pred_parent = buffer_shift_dependents[i]
-          fh.write('\t'.join([str(entry.id), entry.form, '_', 
-            entry.cpos, entry.pos, 
-            '_', str(pred_parent), '_', '_', '_']) + '\n')
-      fh.write('\n')
+  with open(conll_output_fn, 'w') as conll_fh:
+    with open(transition_output_fn, 'w') as tr_fh:
+      for i, val_sent in enumerate(val_sentences):
+        if max_sents > 0 and i > max_sents:
+          break
+        sentence_data = nn_utils.get_sentence_data_batch([val_sent], use_cuda,
+            evaluation=True)
+        transition_logits, actions, dependents = stack_model.forward(sentence_data)
+        action_str = ' '.join([data_utils.transition_to_str(act) 
+                               for act in actions])
+        tr_fh.write(action_str + '\n')
+        for i, entry in enumerate(val_sent.conll):
+          if i > 0:
+            pred_parent = dependents[i]
+            #if stack_model.stack_next:
+            #pred_parent = stack_shift_dependents[i]
+            #else:
+            #  pred_parent = buffer_shift_dependents[i]
+            conll_fh.write('\t'.join([str(entry.id), entry.form, '_', 
+              entry.cpos, entry.pos, 
+              '_', str(pred_parent), '_', '_', '_']) + '\n')
+        conll_fh.write('\n')
   print('decode time {:2.2f}s'.format(time.time() - decode_start_time))
  
 
@@ -79,7 +83,7 @@ def train(args, sentences, dev_sentences, word_vocab):
     epoch_start_time = time.time()
     
     random.shuffle(sentences)
-    sentences.sort(key=len) 
+    sentences.sort(key=len) #, reverse=True) #temp 
     stack_model.train()
 
     total_loss = 0 
@@ -124,9 +128,10 @@ def train(args, sentences, dev_sentences, word_vocab):
 
       if batch_count % args.logging_interval == 0 and i > 0:
         if args.decode_at_checkpoints:
-          training_decode(dev_sentences, stack_model, word_vocab, (args.working_dir + '/'
-              + args.dev_name + '.' + str(epoch) + '.' + str(batch_count) 
-              + '.shre'), -1, args.cuda)  #TODO 100
+          out_name = (args.working_dir + '/' + args.dev_name + '.' 
+                      + str(epoch) + '.' + str(batch_count))
+          training_decode(dev_sentences, stack_model, word_vocab, 
+              out_name + '.conll', out_name + '.tr', -1, args.cuda)  #TODO 100
           stack_model.train()
 
         cur_loss = total_loss[0] / total_num_tokens
@@ -146,7 +151,8 @@ def train(args, sentences, dev_sentences, word_vocab):
         epoch, (time.time() - epoch_start_time), batch_count, global_num_tokens,
         avg_global_loss, math.exp(avg_global_loss)))
 
-    if False: #TODO temp
+    val_loss = None
+    if False: # TODO temp disable
       # Eval dev set ppl  
       val_batch_size = 1
       total_loss = 0
@@ -177,8 +183,10 @@ def train(args, sentences, dev_sentences, word_vocab):
 
       print('-' * 89)
 
-    training_decode(dev_sentences, stack_model, word_vocab, args.working_dir + '/'
-        + args.dev_name + '.' + str(epoch) + '.shre', use_cuda=args.cuda)
+
+    out_name = args.working_dir + '/' + args.dev_name + '.' + str(epoch) 
+    training_decode(dev_sentences, stack_model, word_vocab, out_name + '.conll',
+        out_name + '.tr', use_cuda=args.cuda)
     
     # Anneal the learning rate.
     if (not args.adam and args.num_init_lr_epochs > 0 
