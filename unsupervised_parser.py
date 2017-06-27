@@ -131,7 +131,7 @@ def train(args, sentences, dev_sentences, word_vocab):
           out_name = (args.working_dir + '/' + args.dev_name + '.' 
                       + str(epoch) + '.' + str(batch_count))
           training_decode(dev_sentences, stack_model, word_vocab, 
-              out_name + '.conll', out_name + '.tr', -1, args.cuda)  #TODO 100
+              out_name + '.conll', out_name + '.tr', -1, args.cuda)
           stack_model.train()
 
         cur_loss = total_loss[0] / total_num_tokens
@@ -152,7 +152,7 @@ def train(args, sentences, dev_sentences, word_vocab):
         avg_global_loss, math.exp(avg_global_loss)))
 
     val_loss = None
-    if False: # TODO temp disable
+    if True:
       # Eval dev set ppl  
       val_batch_size = 1
       total_loss = 0

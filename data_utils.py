@@ -543,8 +543,11 @@ def read_sentences_given_fixed_vocab(conll_name, working_path, max_length=-1):
     for sentence in read_conll(conllFP, False, False, False):
       conll_sentences.append(sentence)
       for j, node in enumerate(sentence):
+        if node.relation in rel_vocab.dic:
+          sentence[j].relation_id = rel_vocab.get_id(node.relation) 
+        else: # back off to most frequent relation 
+          sentence[j].relation_id = 0
         #assert node.form in word_vocab.dic, node.form + " not in vocab"
-        sentence[j].relation_id = rel_vocab.get_id(node.relation) 
         sentence[j].word_id = word_vocab.get_id(sentence[j].norm)
       sentences.append(ParseSentence.from_vocab_conll(sentence, word_vocab,
         max_length))
