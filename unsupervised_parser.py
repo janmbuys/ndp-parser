@@ -98,21 +98,20 @@ def decode(args, val_sentences, word_vocab, score=False):
   if score:
     total_loss, total_length, total_length_more = training_score(args,
         stack_model, val_sentences)
-  else:  
+
+    val_loss = total_loss[0] / total_length
+    val_loss_more = total_loss[0] / total_length_more
+
+    print('-' * 89)
+    print('| decoding time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
+         (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
+    print('                     | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(
+         val_loss_more, math.exp(val_loss_more)))
+    print('-' * 89)
+  else: # not currently computing ppl here 
     out_name = args.working_dir + '/' + args.dev_name 
-    total_loss, total_length, total_length_more = training_decode(val_sentences,
-        stack_model, word_vocab, out_name + '.conll', out_name + '.tr', 
-        use_cuda=args.cuda) 
-
-  val_loss = total_loss[0] / total_length
-  val_loss_more = total_loss[0] / total_length_more
-
-  print('-' * 89)
-  print('| decoding time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
-       (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
-  print('                     | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(
-       val_loss_more, math.exp(val_loss_more)))
-  print('-' * 89)
+    training_decode(val_sentences, stack_model, word_vocab, out_name + '.conll',
+        out_name + '.tr', use_cuda=args.cuda) 
 
 
 def train(args, sentences, dev_sentences, word_vocab):
