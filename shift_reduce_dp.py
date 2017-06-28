@@ -18,11 +18,13 @@ class ShiftReduceDP(nn.Module):
   """Stack-based generative model with dynamic programming inference.""" 
 
   def __init__(self, vocab_size, embedding_size, hidden_size, num_layers,
-               dropout, init_weight_range, num_features, non_lin, gen_non_lin,
+               dropout, init_weight_range, non_lin, gen_non_lin,
                stack_next, embed_only, use_cuda):
     super(ShiftReduceDP, self).__init__()
     self.use_cuda = use_cuda
     self.stack_next = stack_next
+    num_features = 2
+
     if embed_only:
       self.encoder_model = embed_encoder.EmbedEncoder(vocab_size, embedding_size, 
           hidden_size, dropout, init_weight_range, use_cuda=use_cuda)

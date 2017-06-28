@@ -178,10 +178,10 @@ if __name__=='__main__':
 
   # Read dev and test files with given vocab
   dev_sentences, _, _, _ = data_utils.read_sentences_given_fixed_vocab(
-      args.dev_name, data_working_path, max_length=args.max_sentence_length)
+      args.dev_name, data_working_path)
 
   test_sentences, _,  _, _ = data_utils.read_sentences_given_fixed_vocab(
-      args.test_name, data_working_path, max_length=args.max_sentence_length)
+      args.test_name, data_working_path)
 
   #data_utils.write_conll_baseline(data_path + 'dev.baseline.conll', 
   #    [sent.conll for sent in dev_sentences])
@@ -195,14 +195,15 @@ if __name__=='__main__':
     if args.decode:          
       unsupervised_parser.decode(args, val_sentences, word_vocab)
     elif args.score:
-      unsupervised_parser.score(args, val_sentences, word_vocab)
+      unsupervised_parser.decode(args, val_sentences, word_vocab, score=True)
     else: 
       unsupervised_parser.train(args, sentences, val_sentences, word_vocab)
   else:
     if args.decode:          
       supervised_parser.decode(args, val_sentences, word_vocab, pos_vocab, rel_vocab)
     elif args.score:
-      supervised_parser.score(args, val_sentences, word_vocab, pos_vocab, rel_vocab)
+      supervised_parser.decode(args, val_sentences, word_vocab, pos_vocab, 
+          rel_vocab, score=True)
     else:
       supervised_parser.train(args, sentences, val_sentences, word_vocab, pos_vocab, rel_vocab)
 

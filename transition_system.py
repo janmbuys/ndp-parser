@@ -59,7 +59,6 @@ class TransitionSystem():
           self.direction_model = torch.load(f)
       else:
         self.direction_model = None
-
     else: 
       if embed_only:
         self.encoder_model = embed_encoder.EmbedEncoder(vocab_size, 

@@ -44,26 +44,95 @@ def training_decode(val_sentences, stack_model, word_vocab, conll_output_fn,
   print('decode time {:2.2f}s'.format(time.time() - decode_start_time))
  
 
+def training_score(args, stack_model, val_sentences):
+  val_batch_size = 1
+  total_loss = 0
+  total_length = 0
+  total_length_more = 0
+
+  stack_model.eval()
+  normalize = nn.Sigmoid() 
+  
+  print('Scoring val sentences')
+  for val_sent in val_sentences:
+    sentence_data = nn_utils.get_sentence_data_batch([val_sent], args.cuda,
+        evaluation=True)
+    loss = stack_model.neg_log_likelihood(sentence_data)
+    total_loss += loss.data
+    total_length += len(val_sent) - 1 
+    total_length_more += len(val_sent) 
+
+  return total_loss, total_length, total_length_more
+
+
+def decode(args, val_sentences, word_vocab, score=False):
+  vocab_size = len(word_vocab)
+  batch_size = 1
+  model_path = args.working_dir + '/' + args.save_model
+  #non_lin = args.non_lin #TODO better interface
+  #gen_non_lin = args.gen_non_lin
+
+  assert model_path != ''
+  print('Loading models')
+  model_fn = model_path + '_stack.pt'
+  with open(model_fn, 'rb') as f:
+    stack_model = torch.load(f)
+ 
+  #if args.arc_eager:
+  #  stack_model = arc_eager_dp.ArcEagerDP(vocab_size, args.embedding_size,
+  #    args.hidden_size, args.num_layers, args.dropout,
+  #    args.init_weight_range, args.stack_next, non_lin,
+  #    gen_non_lin, args.embed_only, args.cuda)
+  #else:
+  #  stack_model = shift_reduce_dp.ShiftReduceDP(vocab_size, args.embedding_size,
+  #    args.hidden_size, args.num_layers, args.dropout,
+  #    args.init_weight_range, non_lin,
+  #    gen_non_lin, args.stack_next, args.embed_only, args.cuda)
+
+  if args.cuda:
+    stack_model.cuda()
+
+  print('Done loading models')
+  decode_start_time = time.time()
+
+  if score:
+    total_loss, total_length, total_length_more = training_score(args,
+        stack_model, val_sentences)
+  else:  
+    out_name = args.working_dir + '/' + args.dev_name 
+    total_loss, total_length, total_length_more = training_decode(val_sentences,
+        stack_model, word_vocab, out_name + '.conll', out_name + '.tr', 
+        use_cuda=args.cuda) 
+
+  val_loss = total_loss[0] / total_length
+  val_loss_more = total_loss[0] / total_length_more
+
+  print('-' * 89)
+  print('| decoding time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
+       (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
+  print('                     | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(
+       val_loss_more, math.exp(val_loss_more)))
+  print('-' * 89)
+
+
 def train(args, sentences, dev_sentences, word_vocab):
   vocab_size = len(word_vocab)
-  num_features = 2
   batch_size = args.batch_size
   assert args.generative and not args.bidirectional
   
   # Build the model
-  feature_size = args.hidden_size
   non_lin = args.non_lin
   gen_non_lin = args.gen_non_lin
 
   if args.arc_eager:
     stack_model = arc_eager_dp.ArcEagerDP(vocab_size, args.embedding_size,
       args.hidden_size, args.num_layers, args.dropout,
-      args.init_weight_range, num_features, args.stack_next, non_lin,
+      args.init_weight_range, args.stack_next, non_lin,
       gen_non_lin, args.embed_only, args.cuda)
   else:
     stack_model = shift_reduce_dp.ShiftReduceDP(vocab_size, args.embedding_size,
       args.hidden_size, args.num_layers, args.dropout,
-      args.init_weight_range, num_features, non_lin,
+      args.init_weight_range, non_lin,
       gen_non_lin, args.stack_next, args.embed_only, args.cuda)
 
   if args.cuda:
@@ -151,39 +220,21 @@ def train(args, sentences, dev_sentences, word_vocab):
         epoch, (time.time() - epoch_start_time), batch_count, global_num_tokens,
         avg_global_loss, math.exp(avg_global_loss)))
 
-    val_loss = None
-    if True:
-      # Eval dev set ppl  
-      val_batch_size = 1
-      total_loss = 0
-      total_length = 0
-      total_length_more = 0
-      dev_losses = []
-      decode_start_time = time.time()
+    # score the model
+    decode_start_time = time.time()
+    total_loss, total_length, total_length_more = training_score(args,
+        stack_model, dev_sentences)
 
-      stack_model.eval()
-      normalize = nn.Sigmoid() 
-
-      for val_sent in dev_sentences:
-        sentence_data = nn_utils.get_sentence_data_batch([val_sent], args.cuda,
-            evaluation=True)
-        loss = stack_model.neg_log_likelihood(sentence_data)
-        total_loss += loss.data
-        dev_losses.append(loss.data[0])
-        total_length += len(val_sent) - 1 
-        total_length_more += len(val_sent) 
-
-      val_loss = total_loss[0] / total_length
-      val_loss_more = total_loss[0] / total_length_more
-      print('-' * 89)
-      print('| eval time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
+    val_loss = total_loss[0] / total_length
+    val_loss_more = total_loss[0] / total_length_more
+    print('-' * 89)
+    print('| eval time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
           (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
-      print('                     | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(val_loss_more,
-          math.exp(val_loss_more)))
+    print('                     | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(val_loss_more,
+        math.exp(val_loss_more)))
+    print('-' * 89)
 
-      print('-' * 89)
-
-
+    # Decoding
     out_name = args.working_dir + '/' + args.dev_name + '.' + str(epoch) 
     training_decode(dev_sentences, stack_model, word_vocab, out_name + '.conll',
         out_name + '.tr', use_cuda=args.cuda)

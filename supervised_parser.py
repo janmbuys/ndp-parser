@@ -26,7 +26,7 @@ def training_decode(args, tr_system, val_sentences, rel_vocab, epoch=-1):
   tr_system.encoder_model.eval()
   normalize = nn.Sigmoid() 
 
-  print('Decoding dev sentences')
+  print('Decoding val sentences')
   for val_sent in val_sentences:
     sentence_data = nn_utils.get_sentence_data_batch([val_sent], args.cuda, evaluation=True)
     encoder_state = tr_system.encoder_model.init_hidden(val_batch_size)
@@ -122,7 +122,8 @@ def training_score(args, tr_system, val_sentences):
 
   return total_loss, total_length, total_length_more
 
-def decode(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
+
+def decode(args, val_sentences, word_vocab, pos_vocab, rel_vocab, score=False):
   vocab_size = len(word_vocab)
   num_relations = len(rel_vocab)
   batch_size = 1
@@ -154,60 +155,18 @@ def decode(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
   print('Done loading models')
 
   decode_start_time = time.time()
-  total_loss, total_length, total_length_more = training_decode(args,
-          tr_system, val_sentences, rel_vocab)
+  if score:
+    total_loss, total_length, total_length_more = training_score(args,
+        tr_system, val_sentences)
+  else:
+    total_loss, total_length, total_length_more = training_decode(args,
+        tr_system, val_sentences, rel_vocab)
 
   val_loss = total_loss[0] / total_length
   val_loss_more = total_loss[0] / total_length_more
 
   print('-' * 89)
   print('| decoding time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
-       (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
-  print('                     | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(
-       val_loss_more, math.exp(val_loss_more)))
-  print('-' * 89)
-
-def score(args, val_sentences, word_vocab, pos_vocab, rel_vocab):
-  vocab_size = len(word_vocab)
-  num_relations = len(rel_vocab)
-  batch_size = 1
-  model_path = args.working_dir + '/' + args.save_model
-  assert args.generative
-  non_lin = args.non_lin #TODO better interface
-  gen_non_lin = args.gen_non_lin
-
-  # Build the model
-  assert args.arc_hybrid or args.arc_eager
-  if args.arc_hybrid:
-    tr_system = arc_hybrid.ArcHybridTransitionSystem(vocab_size,
-        num_relations, args.embedding_size, 
-        args.hidden_size, args.num_layers, args.dropout,
-        args.init_weight_range, args.bidirectional, 
-        args.use_more_features, non_lin, gen_non_lin,
-        args.predict_relations, args.generative,
-        args.decompose_actions, args.embed_only, args.stack_next, 
-        args.batch_size, args.cuda, model_path, True)
-  elif args.arc_eager:
-    tr_system = arc_eager.ArcEagerTransitionSystem(vocab_size,
-        num_relations, args.embedding_size, args.hidden_size, args.num_layers,
-        args.dropout, args.init_weight_range, args.bidirectional, 
-        args.use_more_features, non_lin, gen_non_lin,
-        args.predict_relations, args.generative,
-        args.decompose_actions, args.embed_only, args.stack_next, 
-        args.batch_size, args.cuda, model_path, True,
-        args.late_reduce_oracle)
-
-  print('Done loading models')
-
-  decode_start_time = time.time()
-  total_loss, total_length, total_length_more = training_score(args,
-          tr_system, val_sentences)
-
-  val_loss = - total_loss / total_length
-  val_loss_more = - total_loss / total_length_more
-
-  print('-' * 89)
-  print('| scoring time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
        (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
   print('                     | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(
        val_loss_more, math.exp(val_loss_more)))
