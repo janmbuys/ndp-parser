@@ -19,10 +19,11 @@ class ShiftReduceDP(nn.Module):
 
   def __init__(self, vocab_size, embedding_size, hidden_size, num_layers,
                dropout, init_weight_range, non_lin, gen_non_lin,
-               stack_next, embed_only, use_cuda):
+               stack_next, embed_only, embed_only_gen, use_cuda):
     super(ShiftReduceDP, self).__init__()
     self.use_cuda = use_cuda
     self.stack_next = stack_next
+    self.embed_only_gen = embed_only_gen
     num_features = 2
 
     if embed_only:
@@ -46,12 +47,12 @@ class ShiftReduceDP(nn.Module):
     sent_length = len(word_ids) - 1
     seq_length = len(word_ids)
 
-    features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+    features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
         self.use_cuda)
     re_probs_list = self.binary_normalize(self.transition_model(features)).view(-1)
     word_distr_list = self.log_normalize(self.word_model(features))
 
-    init_features = nn_utils.select_features(encoder_features, [0, 0], 
+    init_features = nn_utils.select_features(encoder_features[1], [0, 0], 
                                              self.use_cuda)
     init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
     # do simple arithmetic to access distribution list entries
@@ -92,12 +93,12 @@ class ShiftReduceDP(nn.Module):
     seq_length = len(word_ids)
     max_dependency_length = 20
 
-    features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+    features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
         self.use_cuda, stack_next=self.stack_next)
     re_probs_list = self.binary_normalize(self.transition_model(features)).view(-1)
     word_distr_list = self.log_normalize(self.word_model(features))
 
-    init_features = nn_utils.select_features(encoder_features, [0, 0], 
+    init_features = nn_utils.select_features(encoder_features[1], [0, 0], 
                                              self.use_cuda)
     init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
     # do simple arithmetic to access distribution list entries
@@ -142,14 +143,11 @@ class ShiftReduceDP(nn.Module):
     sent_length = sentence.size()[0] - 1
     seq_length = sentence.size()[0]
 
-    #print(encoder_features)
     # dim [num_pairs, batch_size, 2, state_size]
-    features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+    features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
         self.use_cuda, stack_next=self.stack_next)
-    rev_features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+    rev_features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
         self.use_cuda, rev=True, stack_next=self.stack_next)
-
-    #print(features)
     num_pairs = features.size()[0]
 
     eps = nn_utils.to_var(torch.FloatTensor(num_pairs, batch_size).fill_(
@@ -160,13 +158,16 @@ class ShiftReduceDP(nn.Module):
     re_rev_probs_list = self.binary_normalize(self.transition_model(rev_features)).view(num_pairs, batch_size)
     re_rev_log_probs_list = torch.log(re_rev_probs_list+eps)
 
-    word_distr_list = self.log_normalize(self.word_model(features)).view(num_pairs, batch_size, -1) 
+    if self.embed_only_gen:
+      gen_features = nn_utils.batch_feature_selection(encoder_features[0], 
+          seq_length, self.use_cuda, stack_next=self.stack_next)
+      word_distr_list = self.log_normalize(self.word_model(gen_features)).view(
+          num_pairs, batch_size, -1) 
+    else:
+      word_distr_list = self.log_normalize(self.word_model(features)).view(
+          num_pairs, batch_size, -1) 
 
-    # do simple arithmetic to access distribution list entries
-    #def get_feature_index(i, j):
-    #  return int((2*seq_length-i-1)*(i/2) + j-i-1)
-
-    # rather enumerate indexes
+    # enumerate indexes
     inds_table = np.zeros((seq_length, seq_length), dtype=np.int)
     counter = 0
     for i in range(seq_length-1):
@@ -196,7 +197,7 @@ class ShiftReduceDP(nn.Module):
     if self.stack_next:
       table[0, 0, 1] = nn_utils.to_var(torch.FloatTensor(batch_size).fill_(0), self.use_cuda)
     else:  
-      init_features = nn_utils.select_features(encoder_features, [0, 0], 
+      init_features = nn_utils.select_features(encoder_features[1], [0, 0], 
                                                self.use_cuda)
       # dim [batch_size x vocab_size]
       init_word_distr = self.log_normalize(self.word_model(init_features))
@@ -271,7 +272,7 @@ class ShiftReduceDP(nn.Module):
       if len(stack) > 1: # allowed to re
         position = nn_utils.extract_feature_positions(buffer_index, s0,
             stack_next=self.stack_next)
-        features = nn_utils.select_features(encoder_features, position, self.use_cuda)
+        features = nn_utils.select_features(encoder_features[1], position, self.use_cuda)
         
         transition_logit = self.transition_model(features)
         if buffer_index == sent_length:
@@ -305,10 +306,15 @@ class ShiftReduceDP(nn.Module):
     word_log_probs = np.empty([sent_length, sent_length])
     word_log_probs.fill(-np.inf)
 
-    features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+    features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
         self.use_cuda, stack_next=self.stack_next)
     re_probs_list = nn_utils.to_numpy(self.binary_normalize(self.transition_model(features)))
-    word_distr_list = self.log_normalize(self.word_model(features))
+    if self.embed_only_gen:
+      gen_features = nn_utils.batch_feature_selection(encoder_features[0], 
+          seq_length, self.use_cuda, stack_next=self.stack_next)
+      word_distr_list = self.log_normalize(self.word_model(gen_features))
+    else:        
+      word_distr_list = self.log_normalize(self.word_model(features))
 
     counter = 0 
     for i in range(seq_length-1):
@@ -328,7 +334,7 @@ class ShiftReduceDP(nn.Module):
     if self.stack_next:
       table[0, 0, 1] = 0
     else:
-      init_features = nn_utils.select_features(encoder_features, [0, 0], 
+      init_features = nn_utils.select_features(encoder_features[1], [0, 0], 
                                                self.use_cuda)
       init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
       table[0, 0, 1] = nn_utils.to_numpy(init_word_distr[word_ids[1]])

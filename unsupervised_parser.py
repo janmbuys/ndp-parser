@@ -78,17 +78,6 @@ def decode(args, val_sentences, word_vocab, score=False):
   with open(model_fn, 'rb') as f:
     stack_model = torch.load(f)
  
-  #if args.arc_eager:
-  #  stack_model = arc_eager_dp.ArcEagerDP(vocab_size, args.embedding_size,
-  #    args.hidden_size, args.num_layers, args.dropout,
-  #    args.init_weight_range, args.stack_next, non_lin,
-  #    gen_non_lin, args.embed_only, args.cuda)
-  #else:
-  #  stack_model = shift_reduce_dp.ShiftReduceDP(vocab_size, args.embedding_size,
-  #    args.hidden_size, args.num_layers, args.dropout,
-  #    args.init_weight_range, non_lin,
-  #    gen_non_lin, args.stack_next, args.embed_only, args.cuda)
-
   if args.cuda:
     stack_model.cuda()
 
@@ -127,12 +116,12 @@ def train(args, sentences, dev_sentences, word_vocab):
     stack_model = arc_eager_dp.ArcEagerDP(vocab_size, args.embedding_size,
       args.hidden_size, args.num_layers, args.dropout,
       args.init_weight_range, args.stack_next, non_lin,
-      gen_non_lin, args.embed_only, args.cuda)
+      gen_non_lin, args.embed_only, args.embed_only_gen, args.cuda)
   else:
     stack_model = shift_reduce_dp.ShiftReduceDP(vocab_size, args.embedding_size,
       args.hidden_size, args.num_layers, args.dropout,
       args.init_weight_range, non_lin,
-      gen_non_lin, args.stack_next, args.embed_only, args.cuda)
+      gen_non_lin, args.stack_next, args.embed_only, args.embed_only_gen, args.cuda)
 
   if args.cuda:
     stack_model.cuda()

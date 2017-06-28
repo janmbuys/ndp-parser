@@ -34,5 +34,5 @@ class EmbedEncoder(nn.Module):
     # inp: tuple of (seq length, batch_size)
     # hidden: tuple of (layers, batch_size, hidden_size)
     emb = self.drop(self.embed(inp))
-    return emb
+    return (emb, emb)
 

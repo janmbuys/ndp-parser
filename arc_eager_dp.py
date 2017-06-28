@@ -19,11 +19,12 @@ class ArcEagerDP(nn.Module):
 
   def __init__(self, vocab_size, embedding_size, hidden_size, num_layers,
                dropout, init_weight_range, non_lin, gen_non_lin,
-               stack_next, embed_only, use_cuda):
+               stack_next, embed_only, embed_only_gen, use_cuda):
     super(ArcEagerDP, self).__init__()
     self.use_cuda = use_cuda
     self.stack_next = stack_next
     self.generate_actions = [data_utils._SH, data_utils._RA]
+    self.embed_only_gen = embed_only_gen
     self.num_transitions = 3
     num_features = 2
 
@@ -54,7 +55,7 @@ class ArcEagerDP(nn.Module):
     eps = np.exp(-10) # used to avoid division by 0
 
     # batch feature computation
-    enc_features = nn_utils.batch_feature_selection(encoder_features, seq_length, 
+    enc_features = nn_utils.batch_feature_selection(encoder_features[1], seq_length, 
         self.use_cuda, stack_next=self.stack_next)
     features = enc_features
     num_items = enc_features.size()[0]
@@ -64,7 +65,7 @@ class ArcEagerDP(nn.Module):
     word_distr_list = self.log_normalize(self.word_model(features)).view(
         num_items, -1)
 
-    init_features = nn_utils.select_features(encoder_features, [0, 0], self.use_cuda)
+    init_features = nn_utils.select_features(encoder_features[1], [0, 0], self.use_cuda)
     init_word_dist = self.log_normalize(self.word_model(init_features)).view(-1)
     # enumerate indexes
     inds_table = np.zeros((seq_length, seq_length, 2), dtype=np.int)
@@ -133,20 +134,27 @@ class ArcEagerDP(nn.Module):
     eps = np.exp(-10) # used to avoid division by 0
 
     # batch feature computation
-    features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+    features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
         self.use_cuda, stack_next=self.stack_next)
-    rev_features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+    rev_features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
         self.use_cuda, rev=True, stack_next=self.stack_next)
     num_items = features.size()[0]
 
     tr_log_probs_list = self.log_normalize(self.transition_model(features)).view(
         num_items, self.num_transitions)
-    word_distr_list = self.log_normalize(self.word_model(features)).view(
-        num_items, -1)
+
+    if self.embed_only_gen:
+      gen_features = nn_utils.batch_feature_selection(encoder_features[0], 
+          seq_length, self.use_cuda, stack_next=self.stack_next)
+      word_distr_list = self.log_normalize(self.word_model(gen_features)).view(
+          num_items, -1)
+    else:
+      word_distr_list = self.log_normalize(self.word_model(features)).view(
+          num_items, -1)
 
     re_rev_log_probs_list = self.log_normalize(self.transition_model(rev_features)).view(num_items, self.num_transitions)[:,data_utils._ERE]
 
-    init_features = nn_utils.select_features(encoder_features, [0, 0], self.use_cuda)
+    init_features = nn_utils.select_features(encoder_features[1], [0, 0], self.use_cuda)
     init_word_dist = self.log_normalize(self.word_model(init_features)).view(-1)
     # enumerate indexes
     inds_table = np.zeros((seq_length, seq_length), dtype=np.int) #, 2
@@ -238,7 +246,7 @@ class ArcEagerDP(nn.Module):
 
       position = nn_utils.extract_feature_positions(buffer_index, s0,
           stack_next=self.stack_next)
-      encoded_features = nn_utils.select_features(encoder_features, position, self.use_cuda)
+      encoded_features = nn_utils.select_features(encoder_features[1], position, self.use_cuda)
       features = encoded_features
       
       head_ind = torch.LongTensor([1 if stack_has_parent and stack_has_parent[-1] else 0]).view(1, 1)
@@ -300,7 +308,7 @@ class ArcEagerDP(nn.Module):
     word_log_probs.fill(-np.inf)
 
     # batch feature computation
-    enc_features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+    enc_features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
         self.use_cuda, stack_next=self.stack_next)
     features = enc_features
     num_items = enc_features.size()[0]
@@ -308,7 +316,13 @@ class ArcEagerDP(nn.Module):
 
     tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
         self.transition_model(features)).view(num_items, self.num_transitions))
-    word_dist = self.log_normalize(self.word_model(features)).view(num_items, -1)
+
+    if self.embed_only_gen:
+      gen_features = nn_utils.batch_feature_selection(encoder_features[0], 
+          seq_length, self.use_cuda, stack_next=self.stack_next)
+      word_distr_list = self.log_normalize(self.word_model(gen_features)).view(num_items, -1)
+    else:        
+      word_distr_list = self.log_normalize(self.word_model(features)).view(num_items, -1)
 
     counter = 0 
     for i in range(seq_length-1):
@@ -319,7 +333,7 @@ class ArcEagerDP(nn.Module):
           re_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ERE]
           if j < sent_length:
             word_log_probs[i, j, c] = nn_utils.to_numpy(
-                word_dist[counter, word_ids[j if self.stack_next else j+1]])
+                word_distr_list[counter, word_ids[j if self.stack_next else j+1]])
         counter += 1
 
     table_size = len(word_ids)
@@ -336,7 +350,7 @@ class ArcEagerDP(nn.Module):
     if self.stack_next:
       table[0, 0, 0, 0, 1] = 0
     else:
-      init_features = nn_utils.select_features(encoder_features, [0, 0], 
+      init_features = nn_utils.select_features(encoder_features[1], [0, 0], 
                                                self.use_cuda)
       init_word_dist = self.log_normalize(self.word_model(init_features).view(-1))
       table[0, 0, 0, 0, 1] = nn_utils.to_numpy(init_word_dist[word_ids[1]])

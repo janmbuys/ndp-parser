@@ -140,7 +140,7 @@ def decode(args, val_sentences, word_vocab, pos_vocab, rel_vocab, score=False):
         args.init_weight_range, args.bidirectional, 
         args.use_more_features, non_lin, gen_non_lin,
         args.predict_relations, args.generative,
-        args.decompose_actions, args.embed_only,
+        args.decompose_actions, args.embed_only, args.embed_only_gen,
         args.stack_next,
         args.batch_size, args.cuda, model_path, True)
   elif args.arc_eager:
@@ -149,7 +149,8 @@ def decode(args, val_sentences, word_vocab, pos_vocab, rel_vocab, score=False):
         args.dropout, args.init_weight_range, args.bidirectional, 
         args.use_more_features, non_lin, gen_non_lin,
         args.predict_relations, args.generative,
-        args.decompose_actions, args.embed_only, args.stack_next,
+        args.decompose_actions, args.embed_only, args.embed_only_gen, 
+        args.stack_next,
         args.batch_size, args.cuda, model_path, True, args.late_reduce_oracle)
 
   print('Done loading models')
@@ -190,15 +191,15 @@ def train(args, sentences, dev_sentences, word_vocab, pos_vocab, rel_vocab):
         args.init_weight_range, args.bidirectional, 
         args.use_more_features, non_lin, gen_non_lin,
         args.predict_relations, args.generative,
-        args.decompose_actions, args.embed_only, args.stack_next, 
-        args.batch_size, args.cuda, model_path, False)
+        args.decompose_actions, args.embed_only, args.embed_only_gen, 
+        args.stack_next, args.batch_size, args.cuda, model_path, False)
   elif args.arc_eager:
     tr_system = arc_eager.ArcEagerTransitionSystem(vocab_size,
         num_relations, args.embedding_size, args.hidden_size, args.num_layers,
         args.dropout, args.init_weight_range, args.bidirectional, 
         args.use_more_features, non_lin, gen_non_lin,
-        args.predict_relations, args.generative,
-        args.decompose_actions, args.embed_only, args.stack_next, 
+        args.predict_relations, args.generative, args.decompose_actions, 
+        args.embed_only, args.embed_only_gen, args.stack_next, 
         args.batch_size, args.cuda, model_path, False, args.late_reduce_oracle)
 
   criterion = nn.CrossEntropyLoss(size_average=False)
@@ -256,10 +257,10 @@ def train(args, sentences, dev_sentences, word_vocab, pos_vocab, rel_vocab):
       encoder_output = tr_system.encoder_model(sentence_data, encoder_state)
 
       if args.arc_hybrid and args.linear_oracle:
-        actions, words, labels, features = tr_system.linear_oracle(
+        actions, words, labels, features, gen_features = tr_system.linear_oracle(
             train_sent.conll, encoder_output)
       else:
-        actions, words, labels, features = tr_system.oracle(
+        actions, words, labels, features, gen_features = tr_system.oracle(
             train_sent.conll, encoder_output)
       
       if args.decompose_actions:
@@ -300,8 +301,13 @@ def train(args, sentences, dev_sentences, word_vocab, pos_vocab, rel_vocab):
         relation_output, label_var = nn_utils.filter_logits(relation_logits, labels, use_cuda=args.cuda)
 
       if args.generative:
+        if args.embed_only_gen:
+          word_features = gen_features
+        else:  
+          word_features = features
+
         gen_word_logits = []
-        for feat, action, word in zip(features, actions, words):
+        for feat, action, word in zip(word_features, actions, words):
           if action in tr_system.generate_actions:
             assert word >= 0
             gen_word_logits.append(tr_system.word_model(feat))

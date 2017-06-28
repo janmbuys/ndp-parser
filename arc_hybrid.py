@@ -15,8 +15,8 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
   def __init__(self, vocab_size, num_relations, 
       embedding_size, hidden_size, num_layers, dropout, init_weight_range,
       bidirectional, more_context, non_lin, gen_non_lin, predict_relations, 
-      generative, decompose_actions, embed_only, stack_next, batch_size, 
-      use_cuda, model_path, load_model):
+      generative, decompose_actions, embed_only, embed_only_gen, stack_next, 
+      batch_size, use_cuda, model_path, load_model):
     assert not (more_context and decompose_actions)
     num_transitions = 3
     num_features = 4 if more_context else 2
@@ -24,9 +24,11 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
         num_features, num_transitions, 0, 0, embedding_size, hidden_size, 
         num_layers, dropout, init_weight_range, bidirectional, non_lin,
         gen_non_lin, predict_relations, generative, decompose_actions, 
-        embed_only, stack_next, batch_size, use_cuda, model_path, load_model)
+        embed_only, stack_next, batch_size, use_cuda, 
+        model_path, load_model)
     self.more_context = more_context
     self.generate_actions = [data_utils._SH]
+    self.embed_only_gen = embed_only_gen
 
   def map_transitions(self, actions):
     return [act for act in actions]
@@ -65,7 +67,7 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
     word_log_probs.fill(-np.inf)
 
     # batch feature computation
-    features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+    features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
         self.use_cuda)
     if self.decompose_actions:
       re_probs_list = nn_utils.to_numpy(self.binary_normalize(self.transition_model(features)))
@@ -74,7 +76,12 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
       tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(self.transition_model(features)))
 
     if self.word_model is not None:
-      word_dist = self.log_normalize(self.word_model(features))
+      if self.embed_only_gen:
+        gen_features = nn_utils.batch_feature_selection(encoder_features[0], 
+            seq_length, self.use_cuda)
+        word_dist = self.log_normalize(self.word_model(gen_features))
+      else:
+        word_dist = self.log_normalize(self.word_model(features))
 
     counter = 0 
     for i in range(seq_length-1):
@@ -103,7 +110,10 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
 
     # first word prob 
     if self.word_model is not None:
-      init_features = nn_utils.select_features(encoder_features, [0, 0], self.use_cuda)
+      if self.embed_only_gen:
+        init_features = nn_utils.select_features(encoder_features[0], [0, 0], self.use_cuda)
+      else:
+        init_features = nn_utils.select_features(encoder_features[1], [0, 0], self.use_cuda)
       word_dist = self.log_normalize(self.word_model(init_features).view(-1))
       table[0, 0, 1] = nn_utils.to_numpy(word_dist[conll[1].word_id])
     else:
@@ -199,7 +209,7 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
 
       position = nn_utils.extract_feature_positions(buffer_index, s0, s1, s2,
           self.more_context)
-      features = nn_utils.select_features(encoder_features, position, self.use_cuda)
+      features = nn_utils.select_features(encoder_features[1], position, self.use_cuda)
 
       if len(stack) > 1: # allowed to ra or la
         #TODO rather score transition and relation jointly for greedy choice
@@ -254,7 +264,11 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
           label = int(relation_logit_np.argmax(axis=1)[0])
         
       if self.word_model is not None and action == data_utils._SH:
-        word_logit = self.word_model(features)
+        if self.embed_only_gen:
+          gen_features = nn_utils.select_features(encoder_features[0], position, self.use_cuda)
+          word_logit = self.word_model(gen_features)
+        else:
+          word_logit = self.word_model(features)
         gen_word_logits.append(word_logit)
         if buffer_index+1 < sent_length:
           word = conll[buffer_index+1].word_id
@@ -322,14 +336,19 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
     word_log_probs.fill(-np.inf)
 
     # batch feature computation
-    features = nn_utils.batch_feature_selection(encoder_features, seq_length,
+    features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
         self.use_cuda)
     if self.decompose_actions:
       re_probs_list = nn_utils.to_numpy(self.binary_normalize(self.transition_model(features)))
     else:
       tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(self.transition_model(features)))
 
-    word_dist = self.log_normalize(self.word_model(features))
+    if self.embed_only_gen:
+      gen_features = nn_utils.batch_feature_selection(encoder_features[0], 
+          seq_length, self.use_cuda)
+      word_dist = self.log_normalize(self.word_model(gen_features))
+    else:
+      word_dist = self.log_normalize(self.word_model(features))
 
     counter = 0 
     for i in range(seq_length-1):
@@ -354,7 +373,7 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
     table.fill(-np.inf) # log probabilities
 
     # first word prob 
-    init_features = nn_utils.select_features(encoder_features, [0, 0], self.use_cuda)
+    init_features = nn_utils.select_features(encoder_features[1], [0, 0], self.use_cuda)
     word_dist = self.log_normalize(self.word_model(init_features).view(-1))
     table[0, 0, 1] = nn_utils.to_numpy(word_dist[conll[1].word_id])
 
@@ -395,9 +414,9 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
     labels = []
     words = []
     features = []
+    gen_features = []
 
     while buffer_index < sent_length or len(stack) > 1:
-      feature = None
       action = data_utils._SH
       s0 = stack.roots[-1].id if len(stack) > 0 else 0
       s1 = stack.roots[-2].id if len(stack) > 1 else 0
@@ -409,9 +428,13 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
           
       position = nn_utils.extract_feature_positions(buffer_index, s0, s1, s2,
           self.more_context) 
-      feature = nn_utils.select_features(encoder_features, position, self.use_cuda)
+      feature = nn_utils.select_features(encoder_features[1], position, self.use_cuda)
       features.append(feature)
-       
+      if self.embed_only_gen:
+        gen_feature = nn_utils.select_features(encoder_features[0], position,
+            self.use_cuda)
+        gen_features.append(gen_feature)
+
       label = -1 if action == data_utils._SH else stack.roots[-1].relation_id
       if action == data_utils._SH:
         if buffer_index+1 < sent_length:
@@ -440,7 +463,7 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
           buf.roots[0].children.append(child) 
         else:
           stack.roots[-1].children.append(child)
-    return actions, words, labels, features
+    return actions, words, labels, features, gen_features
 
 
   def oracle(self, conll, encoder_features):
@@ -458,9 +481,9 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
     labels = []
     words = []
     features = []
+    gen_features = []
 
     while buffer_index < sent_length or len(stack) > 1:
-      feature = None
       action = data_utils._SH
       s0 = stack.roots[-1].id if len(stack) > 0 else 0
       s1 = stack.roots[-2].id if len(stack) > 1 else 0
@@ -479,8 +502,12 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
    
       position = nn_utils.extract_feature_positions(buffer_index, s0, s1, s2,
           self.more_context) 
-      feature = nn_utils.select_features(encoder_features, position, self.use_cuda)
+      feature = nn_utils.select_features(encoder_features[1], position, self.use_cuda)
       features.append(feature)
+      if self.embed_only_gen:
+        gen_feature = nn_utils.select_features(encoder_features[0], position,
+            self.use_cuda)
+        gen_features.append(gen_feature)
        
       label = -1 if action == data_utils._SH else stack.roots[-1].relation_id
       if action == data_utils._SH:
@@ -510,5 +537,5 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
           buf.roots[0].children.append(child) 
         else:
           stack.roots[-1].children.append(child)
-    return actions, words, labels, features
+    return actions, words, labels, features, gen_features
 

@@ -76,6 +76,8 @@ if __name__=='__main__':
                       help='POS only')
   parser.add_argument('--embed_only', action='store_true',
                       help='Embed only, no RNN')
+  parser.add_argument('--embed_only_gen', action='store_true',
+                      help='Embed only for generation, RNN for transitions')
   parser.add_argument('--embedding_size', type=int, default=128,
                       help='size of word embeddings')
   parser.add_argument('--hidden_size', type=int, default=128, 
