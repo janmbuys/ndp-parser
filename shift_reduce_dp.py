@@ -244,7 +244,7 @@ class ShiftReduceDP(nn.Module):
               
         # Super vectorization 
         re_probs = re_rev_log_probs_list[start_ind:end_ind]
-        temp_right = table[i, i+1:j, j] + re_probs.view(1, -1, batch_size)
+        temp_right = table[i, i+1:j, j] + re_probs #.view(1, -1, batch_size)
         all_block_scores = (table[0:max(i, 1), i, i+1:j] 
                             + temp_right.expand(max(i, 1), gap - 1, batch_size))
         table[0:max(i, 1), i, j] = nn_utils.log_sum_exp(all_block_scores, 1)

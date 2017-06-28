@@ -48,7 +48,7 @@ class ArcEagerDP(nn.Module):
     #self.binary_normalize = nn.Sigmoid()
 
 
-  def _inside_algorithm(self, encoder_features, sentence, batch_size):
+  def _inside_algorithm_iterative(self, encoder_features, sentence, batch_size):
     assert batch_size == 1, "Batch processing not supported here"
     sent_length = sentence.size()[0] - 1
     seq_length = sentence.size()[0]
@@ -154,8 +154,6 @@ class ArcEagerDP(nn.Module):
 
     re_rev_log_probs_list = self.log_normalize(self.transition_model(rev_features)).view(num_items, self.num_transitions)[:,data_utils._ERE]
 
-    init_features = nn_utils.select_features(encoder_features[1], [0, 0], self.use_cuda)
-    init_word_dist = self.log_normalize(self.word_model(init_features)).view(-1)
     # enumerate indexes
     inds_table = np.zeros((seq_length, seq_length), dtype=np.int) #, 2
     counter = 0
@@ -185,7 +183,12 @@ class ArcEagerDP(nn.Module):
         table_size).fill_(-np.inf), self.use_cuda)
    
     # word probs
-    table[0, 0, 0, 0, 1] = torch.gather(init_word_dist, 0, sentence[1].view(1))
+    if self.stack_next:
+      table[0, 0, 0, 0, 1] = nn_utils.to_var(torch.FloatTensor(1).fill_(0), self.use_cuda)
+    else:    
+      init_features = nn_utils.select_features(encoder_features[1], [0, 0], self.use_cuda)
+      init_word_dist = self.log_normalize(self.word_model(init_features)).view(-1)
+      table[0, 0, 0, 0, 1] = torch.gather(init_word_dist, 0, sentence[1].view(1))
 
     # could potentially parallize over i, but may not be worth it
     for i in range(sent_length-1): 
@@ -224,6 +227,111 @@ class ArcEagerDP(nn.Module):
 
         table[0:max(i,1), 0:h, i, 0:h, j] = nn_utils.log_sum_exp(block_scores, 3)
     return table[0, 0, 0, 0, sent_length] 
+
+
+  def _inside_algorithm_vectorized_batched(self, encoder_features, sentence, batch_size):
+    sent_length = sentence.size()[0] - 1
+    seq_length = sentence.size()[0]
+
+    # batch feature computation
+    features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
+        self.use_cuda, stack_next=self.stack_next)
+    rev_features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
+        self.use_cuda, rev=True, stack_next=self.stack_next)
+    num_items = features.size()[0]
+
+    # dim [num_items, batch_size, output_size]
+    tr_log_probs_list = self.log_normalize(self.transition_model(features)).view(
+        num_items, batch_size, self.num_transitions)
+    re_rev_log_probs_list = self.log_normalize(self.transition_model(
+        rev_features)).view(num_items, batch_size, self.num_transitions)[:,:,data_utils._ERE]
+
+
+    if self.embed_only_gen:
+      gen_features = nn_utils.batch_feature_selection(encoder_features[0], 
+          seq_length, self.use_cuda, stack_next=self.stack_next)
+      word_distr_list = self.log_normalize(self.word_model(gen_features)).view(
+          num_items, batch_size, -1)
+    else:
+      word_distr_list = self.log_normalize(self.word_model(features)).view(
+          num_items, batch_size, -1)
+
+    # enumerate indexes
+    inds_table = np.zeros((seq_length, seq_length), dtype=np.int) #, 2
+    counter = 0
+    for i in range(seq_length-1):
+      for j in range(i+1, seq_length):
+        #for c in range(2):
+        inds_table[i, j-1 if self.stack_next else j] = counter #, c
+        counter += 1 # c's use same features for now
+
+    def get_feature_index(i, j, c=None): # independent of c
+      return inds_table[i, j-1 if self.stack_next else j]
+
+    # enumerate reverse indexes
+    rev_inds_table = np.zeros((seq_length, seq_length), dtype=np.int) #, 2
+    counter = 0
+    for j in range(1, seq_length):
+      for i in range(j):
+        #for c in range(2):
+        rev_inds_table[i, j-1 if self.stack_next else j] = counter
+        counter += 1
+
+    def get_rev_feature_index(i, j, c=None):
+      return rev_inds_table[i, j-1 if self.stack_next else j]
+
+    table_size = sentence.size()[0]
+    table = nn_utils.to_var(torch.FloatTensor(table_size, 2, table_size, 2,
+        table_size, batch_size).fill_(-np.inf), self.use_cuda)
+   
+    # word probs
+    if self.stack_next:
+      table[0, 0, 0, 0, 1] = nn_utils.to_var(torch.FloatTensor(batch_size).fill_(0), self.use_cuda)
+    else:
+      init_features = nn_utils.select_features(encoder_features[1], [0, 0], self.use_cuda)
+      init_word_dist = self.log_normalize(self.word_model(init_features))
+      table[0, 0, 0, 0, 1] = torch.gather(init_word_dist, 1,
+                                          sentence[1].view(-1, 1))
+
+    # could potentially parallize over i, but may not be worth it
+    for i in range(sent_length-1): 
+      for j in range(i+1, sent_length):
+        index = get_feature_index(i, j)
+        word_prob = torch.gather(word_distr_list[index], 1,
+            sentence[j if self.stack_next else j+1].view(-1, 1))
+
+        for c in range(2):
+            table[i, c, j, 0, j+1] = (tr_log_probs_list[index, :, data_utils._ESH]
+              + word_prob)
+            table[i, c, j, 1, j+1] = (tr_log_probs_list[index, :, data_utils._ERA]
+              + word_prob)
+
+    for gap in range(2, sent_length+1):
+      for i in range(sent_length+1-gap):
+        j = i + gap
+        h = 1 if i == 0 else 2 # number of indicators to be filled
+
+        start_ind = get_rev_feature_index(i+1, j)
+        end_ind = get_rev_feature_index(j-1, j) + 1
+        re_probs = re_rev_log_probs_list[start_ind:end_ind]
+         
+        scores = nn_utils.to_var(torch.FloatTensor(1, 1, h, gap-1, 2, batch_size), self.cuda)
+        for c in range(h): # need loop because we can't expand re_probs
+          scores[0, 0, c, :, 0] = table[i, c, i+1:j, 0, j] + re_probs
+          scores[0, 0, c, :, 1] = table[i, c, i+1:j, 1, j] + re_probs
+
+        # dim [1, 1, h, gap-1, batch_size]
+        if j == sent_length:
+          temp_right = scores[:, :, :, :, 1]
+        else:
+          temp_right = nn_utils.log_sum_exp(scores, 4).squeeze(4)
+
+        block_scores = (table[0:max(i,1), 0:h, i, 0:h, i+1:j] +
+                        temp_right.expand(max(i,1), h, h, gap-1, batch_size))
+
+        table[0:max(i,1), 0:h, i, 0:h, j] = nn_utils.log_sum_exp(block_scores, 3)
+    return table[0, 0, 0, 0, sent_length] 
+
 
 
   def _decode_action_sequence(self, encoder_features, word_ids, actions):
@@ -418,7 +526,7 @@ class ArcEagerDP(nn.Module):
     encoder_state = self.encoder_model.init_hidden(batch_size)
     encoder_features = self.encoder_model(sentence, encoder_state)
 
-    loss = -torch.sum(self._inside_algorithm_vectorized(
+    loss = -torch.sum(self._inside_algorithm_vectorized_batched(
         encoder_features, sentence, batch_size))
     return loss
 
