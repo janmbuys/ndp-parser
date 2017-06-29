@@ -21,7 +21,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
       predict_relations, generative, decompose_actions, embed_only, 
       embed_only_gen, stack_next, batch_size, use_cuda, model_path, 
       load_model, late_reduce_oracle):
-    assert not decompose_actions and not more_context
+    assert not more_context
     num_transitions = 3
     num_features = 2 # TODO not including headed feature
     super(ArcEagerTransitionSystem, self).__init__(vocab_size, num_relations,
@@ -114,6 +114,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     while buffer_index < sent_length or len(stack) > 1:
       transition_logit = None
       relation_logit = None
+      direction_logit = None
 
       if given_actions is not None:
         assert len(given_actions) > num_actions
@@ -126,21 +127,19 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
       s0 = stack.roots[-1].id if len(stack) > 0 else 0
 
       position = nn_utils.extract_feature_positions(buffer_index, s0)
-      enc_features = nn_utils.select_features(encoder_features[1], position, self.use_cuda)
-      head_ind = torch.LongTensor([1 if stack_has_parent and stack_has_parent[-1] else 0]).view(1, 1)
+      features = nn_utils.select_features(encoder_features[1], position, self.use_cuda)
+      #head_ind = torch.LongTensor([1 if stack_has_parent and stack_has_parent[-1] else 0]).view(1, 1)
       # head_feat = self.embed_headed(nn_utils.to_var(head_ind, self.use_cuda)) 
       # features = torch.cat((enc_features, head_feat), 0) #TODO
-      features = enc_features
+      #features = enc_features
 
       if len(stack) > 0: # allowed to ra or la
-        transition_logit = self.transition_model(features)
-        transition_logit_np = transition_logit.type(torch.FloatTensor).data.numpy()
-
         if buffer_index == sent_length:
           if given_actions is not None:
             assert action == data_utils._RE or action == data_utils._LA
           pred_action = data_utils._ERE
         else:
+          transition_logit = self.transition_model(features)
           if given_actions is not None:
             if action == data_utils._SH:
               pred_action = data_utils._ESH
@@ -148,16 +147,34 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
               pred_action = data_utils._ERA
             else:
               pred_action = data_utils._ERE
-          else:  
+            if self.direction_model is not None:
+              if pred_action != data_utils._ERE:
+                direction_logit = self.direction_model(features)  
+          elif self.direction_model is not None:
+            #TODO instead of sigmoid can just test > 0 if not scoring
+            transition_sigmoid = self.binary_normalize(transition_logit)
+            transition_sigmoid_np = transition_sigmoid.type(torch.FloatTensor).data.numpy()
+            sh_action = int(np.round(transition_sigmoid_np)[0])
+            if sh_action == data_utils._SSH:
+              direction_logit = self.direction_model(features)  
+              direction_sigmoid = self.binary_normalize(direction_logit)
+              direction_sigmoid_np = direction_sigmoid.type(torch.FloatTensor).data.numpy()
+              direction = int(np.round(direction_sigmoid_np)[0])
+              if direction == data_utils._LSH:
+                pred_action = data_utils._ESH
+              else:
+                pred_action = data_utils._ERA
+            else:
+              pred_action = data_utils._ERE
+          else:   
+            transition_logit_np = transition_logit.type(torch.FloatTensor).data.numpy()
             pred_action = int(transition_logit_np.argmax(axis=1)[0])
-          transition_logits.append(transition_logit)
 
         if given_actions is not None:
           if pred_action == data_utils._ERE:
             if stack_has_parent[-1]:
               assert action == data_utils._RE
             elif buffer_index == sent_length:
-              # TODO not always _RE for decoding
               assert action == data_utils._RE or action == data_utils._LA
             else:
               assert action == data_utils._LA
@@ -197,6 +214,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
         words.append(word)
 
       transition_logits.append(transition_logit)
+      direction_logits.append(transition_logit)
       num_actions += 1
       predicted_actions.append(pred_action) 
       if self.relation_model is not None:
@@ -234,12 +252,11 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
           if self.relation_model is not None:
             conll[child.id].pred_relation_ind = label
 
-    return conll, transition_logits, None, predicted_actions, relation_logits, labels, gen_word_logits, words
+    return conll, transition_logits, direction_logits, predicted_actions, relation_logits, labels, gen_word_logits, words
 
 
   def viterbi_decode(self, conll, encoder_features):
     sent_length = len(conll) # includes root, but not eos
-    eps = np.exp(-10) # used to avoid division by 0
 
     # compute all sh/re and word probabilities
     seq_length = sent_length + 1
@@ -250,17 +267,18 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     word_log_probs.fill(-np.inf)
 
     # batch feature computation
-    enc_features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
+    features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
         self.use_cuda)
-    num_items = enc_features.size()[0]
+    num_items = features.size()[0]
 
     # dim [num_items, 2 (headedness), batch_size, num_features, feature_size]
     #encoded_features = enc_features.view(num_items, 1, 1, 2, self.feature_size).expand(
     #  num_items, 2, 1, 2, self.feature_size)
+    #features = enc_features
 
     # expand to add headedness feature
-    head_ind0 = torch.LongTensor(num_items).fill_(0)
-    head_ind1 = torch.LongTensor(num_items).fill_(1)
+    #head_ind0 = torch.LongTensor(num_items).fill_(0)
+    #head_ind1 = torch.LongTensor(num_items).fill_(1)
             
     #head_feat0 = self.embed_headed(nn_utils.to_var(head_ind0, self.use_cuda)) 
     #head_feat1 = self.embed_headed(nn_utils.to_var(head_ind1, self.use_cuda)) 
@@ -273,9 +291,14 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     #tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
     #    self.transition_model(features)).view(num_items, 2, self.num_transitions))
 
-    features = enc_features
-    tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
-        self.transition_model(features)).view(num_items, self.num_transitions))
+    if self.decompose_actions:
+      re_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.transition_model(features)))
+      sh_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.transition_model(features)))
+      ra_dir_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.direction_model(features)))
+      sh_dir_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.direction_model(features)))
+    else: 
+      tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
+          self.transition_model(features)).view(num_items, self.num_transitions))
 
     if self.word_model is not None:
       #word_dist = self.log_normalize(self.word_model(features)).view(
@@ -293,9 +316,16 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     for i in range(seq_length-1):
       for j in range(i+1, seq_length):
         for c in range(2):
-          shift_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ESH]
-          ra_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ERA]
-          re_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ERE]
+          if self.decompose_actions:
+            shift_log_probs[i, j] = (sh_log_probs_list[counter] 
+                                     + sh_dir_log_probs_list[counter])
+            ra_log_probs[i, j] = (sh_log_probs_list[counter] 
+                                  + ra_dir_log_probs_list[counter])
+            re_log_probs[i, j] = re_log_probs_list[counter] 
+          else:
+            shift_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ESH]
+            ra_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ERA]
+            re_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ERE]
           if self.word_model is not None and j < sent_length:
             if j < sent_length - 1:
               word_id = conll[j+1].word_id 
@@ -390,7 +420,6 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
   def inside_score(self, conll, encoder_features):
     assert self.word_model is not None
     sent_length = len(conll) # includes root, but not eos
-    eps = np.exp(-10) # used to avoid division by 0
 
     # compute all sh/re and word probabilities
     seq_length = sent_length + 1
@@ -401,17 +430,17 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     word_log_probs.fill(-np.inf)
 
     # batch feature computation
-    enc_features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
+    features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
         self.use_cuda)
-    num_items = enc_features.size()[0]
+    num_items = features.size()[0]
 
     # dim [num_items, 2 (headedness), batch_size, num_features, feature_size]
     #encoded_features = enc_features.view(num_items, 1, 1, 2, self.feature_size).expand(
     #    num_items, 2, 1, 2, self.feature_size)
 
     # expand to add headedness feature
-    head_ind0 = torch.LongTensor(num_items).fill_(0)
-    head_ind1 = torch.LongTensor(num_items).fill_(1)
+    #head_ind0 = torch.LongTensor(num_items).fill_(0)
+    #head_ind1 = torch.LongTensor(num_items).fill_(1)
             
     #head_feat0 = self.embed_headed(nn_utils.to_var(head_ind0, self.use_cuda)) 
     #head_feat1 = self.embed_headed(nn_utils.to_var(head_ind1, self.use_cuda)) 
@@ -419,15 +448,25 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     #                           head_feat1.view(num_items, 1, 1, 1, -1)), 1)
     #features = torch.cat((encoded_features, head_features), 3) #TODO
     #features = encoded_features
-    features = enc_features
+    #features = enc_features
 
     #tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
     #    self.transition_model(features)).view(num_items, 2, self.num_transitions))
     #word_dist = self.log_normalize(self.word_model(features)).view(
     #        num_items, 2, self.vocab_size)
 
-    tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
-        self.transition_model(features)).view(num_items, self.num_transitions))
+    if self.decompose_actions:
+      sh_log_probs_list = nn_utils.to_numpy(self.log_normalize(
+        -self.transition_model(features)).view(num_items))
+      sh_ra_log_probs_list = nn_utils.to_numpy(self.log_normalize(
+        self.direction_model(features)).view(num_items)) + sh_log_probs_list
+      sh_sh_log_probs_list = nn_utils.to_numpy(self.log_normalize(
+        -self.direction_model(features)).view(num_items)) + sh_log_probs_list
+      re_log_probs_list = nn_utils.to_numpy(self.log_normalize(self.transition_model(
+          features)).view(num_items))
+    else:  
+      tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
+          self.transition_model(features)).view(num_items, self.num_transitions))
 
     if self.embed_only_gen:
       gen_features = nn_utils.batch_feature_selection(encoder_features[0], 
@@ -442,9 +481,14 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     for i in range(seq_length-1):
       for j in range(i+1, seq_length):
         for c in range(2):
-          shift_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ESH]
-          ra_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ERA]
-          re_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ERE]
+          if self.decompose_actions:
+            shift_log_probs[i, j, c] = sh_sh_log_probs_list[counter]
+            ra_log_probs[i, j, c] = sh_ra_log_probs_list[counter]
+            re_log_probs[i, j, c] = re_log_probs_list[counter]
+          else:
+            shift_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ESH]
+            ra_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ERA]
+            re_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ERE]
           if j < sent_length:
             if j < sent_length - 1:
               word_id = conll[j+1].word_id 
@@ -549,12 +593,12 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
             action = data_utils._RE 
 
       position = nn_utils.extract_feature_positions(buffer_index, s0) 
-      encoded_feature = nn_utils.select_features(encoder_features[1], position, self.use_cuda)
+      feature = nn_utils.select_features(encoder_features[1], position, self.use_cuda)
      
-      head_ind = torch.LongTensor([1 if stack_has_parent and stack_has_parent[-1] else 0]).view(1, 1)
+      #head_ind = torch.LongTensor([1 if stack_has_parent and stack_has_parent[-1] else 0]).view(1, 1)
       #head_feat = self.embed_headed(nn_utils.to_var(head_ind, self.use_cuda)) 
       #feature = torch.cat((encoded_feature, head_feat), 0) #TODO
-      feature = encoded_feature
+      #feature = encoded_feature
       #TODO also add shift binary feature
 
       features.append(feature)

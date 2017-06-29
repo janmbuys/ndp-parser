@@ -26,7 +26,7 @@ def training_decode(val_sentences, stack_model, word_vocab, conll_output_fn,
           break
         sentence_data = nn_utils.get_sentence_data_batch([val_sent], use_cuda,
             evaluation=True)
-        transition_logits, actions, dependents = stack_model.forward(sentence_data)
+        actions, dependents = stack_model.forward(sentence_data)
         action_str = ' '.join([data_utils.transition_to_str(act) 
                                for act in actions])
         tr_fh.write(action_str + '\n')
@@ -115,8 +115,8 @@ def train(args, sentences, dev_sentences, word_vocab):
   if args.arc_eager:
     stack_model = arc_eager_dp.ArcEagerDP(vocab_size, args.embedding_size,
       args.hidden_size, args.num_layers, args.dropout,
-      args.init_weight_range, args.stack_next, non_lin,
-      gen_non_lin, args.embed_only, args.embed_only_gen, args.cuda)
+      args.init_weight_range, args.stack_next, non_lin, gen_non_lin,
+      args.decompose_actions, args.embed_only, args.embed_only_gen, args.cuda)
   else:
     stack_model = shift_reduce_dp.ShiftReduceDP(vocab_size, args.embedding_size,
       args.hidden_size, args.num_layers, args.dropout,

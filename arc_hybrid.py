@@ -52,17 +52,12 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
 
   def viterbi_decode(self, conll, encoder_features):
     sent_length = len(conll) # includes root, but not EOS
-    eps = np.exp(-10) # used to avoid division by 0
 
     # compute all sh/re and word probabilities
     seq_length = sent_length + 1
-    if self.decompose_actions:
-      reduce_probs = np.zeros([seq_length, seq_length])
-      ra_probs = np.zeros([seq_length, seq_length])
-    else:
-      shift_log_probs = np.zeros([seq_length, seq_length])
-      la_log_probs = np.zeros([seq_length, seq_length])
-      ra_log_probs = np.zeros([seq_length, seq_length])
+    shift_log_probs = np.zeros([seq_length, seq_length])
+    la_log_probs = np.zeros([seq_length, seq_length])
+    ra_log_probs = np.zeros([seq_length, seq_length])
     word_log_probs = np.empty([sent_length, sent_length])
     word_log_probs.fill(-np.inf)
 
@@ -70,8 +65,10 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
     features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
         self.use_cuda)
     if self.decompose_actions:
-      re_probs_list = nn_utils.to_numpy(self.binary_normalize(self.transition_model(features)))
-      ra_probs_list = nn_utils.to_numpy(self.binary_normalize(self.direction_model(features)))
+      re_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.transition_model(features)))
+      sh_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.transition_model(features)))
+      ra_dir_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.direction_model(features)))
+      la_dir_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.direction_model(features)))
     else:
       tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(self.transition_model(features)))
 
@@ -87,8 +84,11 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
     for i in range(seq_length-1):
       for j in range(i+1, seq_length):
         if self.decompose_actions:
-          reduce_probs[i, j] = re_probs_list[counter, 0]
-          ra_probs[i, j] = ra_probs_list[counter, 0]
+          shift_log_probs[i, j] = sh_log_probs_list[counter]
+          la_log_probs[i, j] = (re_log_probs_list[counter] 
+                                + la_dir_log_probs_list[counter])
+          ra_log_probs[i, j] = (re_log_probs_list[counter] 
+                                + ra_dir_log_probs_list[counter])
         else:
           shift_log_probs[i, j] = tr_log_probs_list[counter, data_utils._SH]
           la_log_probs[i, j] = tr_log_probs_list[counter, data_utils._LA]
@@ -121,10 +121,7 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
 
     for j in range(2, sent_length+1):
       for i in range(j-1):
-        if self.decompose_actions:
-          score = np.log(1 - reduce_probs[i, j-1] + eps)
-        else:
-          score = shift_log_probs[i, j-1]
+        score = shift_log_probs[i, j-1]
         if self.word_model is not None:
           score += word_log_probs[i, j-1]
         table[i, j-1, j] = score
@@ -134,25 +131,14 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
           block_directions = []
           for k in range(i+1, j):
             score = table[l, i, k] + table[i, k, j] 
-            if self.decompose_actions:
-              score += np.log(reduce_probs[k, j] + eps)
-              ra_prob = ra_probs[k, j]
-              if ra_prob > 0.5 or j == sent_length:
-                score += np.log(ra_prob)
-                block_directions.append(data_utils._DRA)
-              else:
-                score += np.log(1-ra_prob)
-                block_directions.append(data_utils._DLA)
+            ra_prob = ra_log_probs[k, j]
+            la_prob = la_log_probs[k, j]
+            if ra_prob > la_prob or j == sent_length:
+              score += ra_prob
+              block_directions.append(data_utils._DRA)
             else:
-              ra_prob = ra_log_probs[k, j]
-              la_prob = la_log_probs[k, j]
-              if ra_prob > la_prob or j == sent_length:
-                score += ra_prob
-                block_directions.append(data_utils._DRA)
-              else:
-                score += la_prob
-                block_directions.append(data_utils._DLA)
-
+              score += la_prob
+              block_directions.append(data_utils._DLA)
             block_scores.append(score)
           ind = np.argmax(block_scores)
           k = ind + i + 1
@@ -171,7 +157,6 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
         return (backtrack_path(l, i, k) + backtrack_path(i, k, j) + [act])
 
     actions = backtrack_path(0, 0, sent_length)
-    #print(table[0, 0, sent_length]) # scores should match
     return self.greedy_decode(conll, encoder_features, actions)
 
   def greedy_decode(self, conll, encoder_features, given_actions=None):
@@ -189,7 +174,6 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
     direction_logits = []
     gen_word_logits = []
     relation_logits = []
-    normalize = nn.Sigmoid()
 
     while buffer_index < sent_length or len(stack) > 1:
       transition_logit = None
@@ -223,7 +207,7 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
         elif self.direction_model is not None:
           transition_logit = self.transition_model(features)
           #TODO instead of sigmoid can just test > 0 if not scoring
-          transition_sigmoid = normalize(transition_logit)
+          transition_sigmoid = self.binary_normalize(transition_logit)
           transition_sigmoid_np = transition_sigmoid.type(torch.FloatTensor).data.numpy()
           if given_actions is not None:
             if action == data_utils._SH:
@@ -234,7 +218,7 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
             sh_action = int(np.round(transition_sigmoid_np)[0])
           if sh_action == data_utils._SRE:
             direction_logit = self.direction_model(features)  
-            direction_sigmoid = normalize(direction_logit)
+            direction_sigmoid = self.binary_normalize(direction_logit)
             direction_sigmoid_np = direction_sigmoid.type(torch.FloatTensor).data.numpy()
             if given_actions is not None:
               if action == data_utils._LA:
@@ -322,16 +306,11 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
   def inside_score(self, conll, encoder_features):
     assert self.word_model is not None
     sent_length = len(conll) # includes root, but not eos
-    eps = np.exp(-10) # used to avoid division by 0
 
     # compute all sh/re and word probabilities
     seq_length = sent_length + 1
-    if self.decompose_actions:
-      reduce_probs = np.zeros([seq_length, seq_length])
-      ra_probs = np.zeros([seq_length, seq_length])
-    else:
-      shift_log_probs = np.zeros([seq_length, seq_length])
-      re_log_probs = np.zeros([seq_length, seq_length])
+    shift_log_probs = np.zeros([seq_length, seq_length])
+    reduce_log_probs = np.zeros([seq_length, seq_length])
     word_log_probs = np.empty([sent_length, sent_length])
     word_log_probs.fill(-np.inf)
 
@@ -339,7 +318,8 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
     features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
         self.use_cuda)
     if self.decompose_actions:
-      re_probs_list = nn_utils.to_numpy(self.binary_normalize(self.transition_model(features)))
+      re_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.transition_model(features)))
+      sh_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.transition_model(features)))
     else:
       tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(self.transition_model(features)))
 
@@ -354,10 +334,11 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
     for i in range(seq_length-1):
       for j in range(i+1, seq_length):
         if self.decompose_actions:
-          reduce_probs[i, j] = re_probs_list[counter, 0]
+          shift_log_probs[i, j] = sh_log_probs_list[counter]
+          reduce_log_probs[i, j] = re_log_probs_list[counter]
         else:
           shift_log_probs[i, j] = tr_log_probs_list[counter, data_utils._SH]
-          re_log_probs[i, j] = np.logaddexp(
+          reduce_log_probs[i, j] = np.logaddexp(
               tr_log_probs_list[counter, data_utils._LA], 
               tr_log_probs_list[counter, data_utils._RA])
         if j < sent_length:
@@ -379,21 +360,12 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
 
     for j in range(2, sent_length+1):
       for i in range(j-1):
-        if self.decompose_actions:
-          score = np.log(1 - reduce_probs[i, j-1] + eps) 
-        else:
-          score = shift_log_probs[i, j-1]
-        score += word_log_probs[i, j-1]
-        table[i, j-1, j] = score
+        table[i, j-1, j] = shift_log_probs[i, j-1] + word_log_probs[i, j-1]
       for i in range(j-2, -1, -1):
         for l in range(max(i, 1)): # l=0 if i=0
           block_score = -np.inf
           for k in range(i+1, j):
-            item_score = table[l, i, k] + table[i, k, j] 
-            if self.decompose_actions:
-              item_score += np.log(reduce_probs[k, j] + eps)
-            else:
-              item_score += re_log_probs[k, j]
+            item_score = table[l, i, k] + table[i, k, j] + reduce_log_probs[k, j]
             block_score = np.logaddexp(block_score, item_score)
           table[l, i, j] = block_score
     return table[0, 0, sent_length]

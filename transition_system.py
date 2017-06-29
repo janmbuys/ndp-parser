@@ -30,6 +30,7 @@ class TransitionSystem():
     self.num_transitions = num_transitions
     self.log_normalize = nn.LogSoftmax()
     self.binary_normalize = nn.Sigmoid()
+    self.binary_log_normalize = nn.LogSigmoid()
     self.feature_size = (hidden_size*2 if bidirectional else hidden_size)
 
     if load_model:

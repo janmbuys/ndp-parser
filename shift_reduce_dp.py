@@ -40,104 +40,10 @@ class ShiftReduceDP(nn.Module):
          hidden_size, vocab_size, gen_non_lin, use_cuda)
 
     self.log_normalize = nn.LogSoftmax()
-    self.binary_normalize = nn.Sigmoid()
+    self.binary_log_normalize = nn.LogSigmoid()
 
 
-  def _inside_algorithm_iterative_old(self, encoder_features, word_ids):
-    sent_length = len(word_ids) - 1
-    seq_length = len(word_ids)
-
-    features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
-        self.use_cuda)
-    re_probs_list = self.binary_normalize(self.transition_model(features)).view(-1)
-    word_distr_list = self.log_normalize(self.word_model(features))
-
-    init_features = nn_utils.select_features(encoder_features[1], [0, 0], 
-                                             self.use_cuda)
-    init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
-    # do simple arithmetic to access distribution list entries
-    def get_feature_index(i, j):
-      return int((2*seq_length-i-1)*(i/2) + j-i-1)
-
-    table_size = len(word_ids)
-    table = []
-    for _ in range(table_size):
-      in_table = []
-      for _ in range(table_size):
-        in_table.append([None for _ in range(table_size)])
-      table.append(in_table)
-
-    # word probs
-    table[0][0][1] = init_word_distr[word_ids[1]]
-    for i in range(sent_length-1): # features goes 1 index further
-      for j in range(i+1, sent_length): # features goes 1 index further
-        index = get_feature_index(i, j)
-        table[i][j][j+1] = (torch.log1p(-re_probs_list[index]) 
-                            + word_distr_list[index, word_ids[j+1]])
- 
-    for gap in range(2, sent_length+1):
-      for i in range(sent_length+1-gap):
-        j = i + gap
-        for l in range(max(i, 1)):
-          block_scores = []
-          score = None
-          for k in range(i+1, j):
-            re_score = torch.log(re_probs_list[get_feature_index(k, j)])
-            t_score = table[l][i][k] + table[i][k][j] + re_score
-            block_scores.append(t_score)
-          table[l][i][j] = nn_utils.log_sum_exp_1d(torch.cat(block_scores).view(1, -1))
-    return table[0][0][sent_length]
-
-  def _inside_algorithm_iterative(self, encoder_features, word_ids):
-    sent_length = len(word_ids) - 1
-    seq_length = len(word_ids)
-    max_dependency_length = 20
-
-    features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
-        self.use_cuda, stack_next=self.stack_next)
-    re_probs_list = self.binary_normalize(self.transition_model(features)).view(-1)
-    word_distr_list = self.log_normalize(self.word_model(features))
-
-    init_features = nn_utils.select_features(encoder_features[1], [0, 0], 
-                                             self.use_cuda)
-    init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
-    # do simple arithmetic to access distribution list entries
-    def get_feature_index(i, j):
-      return int((2*seq_length-i-1)*(i/2) + j-i-1)
-
-    table_size = len(word_ids)
-    table = nn_utils.to_var(torch.FloatTensor(table_size, table_size, 
-        table_size).fill_(-np.inf), self.use_cuda)
-
-    # word probs
-    table[0, 0, 1] = init_word_distr[word_ids[1]]
-    for i in range(sent_length-1): # features goes 1 index further
-      #for j in range(i+1, sent_length): # features goes 1 index further
-      for j in range(i+1, min(sent_length, i + max_dependency_length)):
-        index = get_feature_index(i, j)
-        table[i, j, j+1] = (torch.log1p(-re_probs_list[index]) 
-            + word_distr_list[index, word_ids[j if self.stack_next else j+1]])
- 
-    for gap in range(2, sent_length+1):
-      #print(gap)
-      for i in range(sent_length+1-gap):
-        j = i + gap
-        #for l in range(max(i, 1)):
-        for l in range(max(0, i-max_dependency_length), max(i, 1)):
-          block_scores = []
-          score = None
-          for k in range(max(i+1, j-max_dependency_length),  j):
-          #for k in range(i+1, j):
-            re_score = torch.log(re_probs_list[get_feature_index(k, j)])
-            t_score = table[l, i, k] + table[i, k, j] + re_score
-            #score = score + t_score if score is not None else t_score
-            block_scores.append(t_score)
-          #table[l][i][j] = score
-          table[l, i, j] = nn_utils.log_sum_exp_1d(torch.cat(block_scores).view(1, -1))
-    return table[0, 0, sent_length]
-
-  def _inside_algorithm_iterative_vectorized(self, encoder_features, sentence,
-      batch_size):
+  def _inside_algorithm(self, encoder_features, sentence, batch_size):
     # enc feature dim length x batch x state_size
     # sentence dim length x batch
     sent_length = sentence.size()[0] - 1
@@ -150,14 +56,10 @@ class ShiftReduceDP(nn.Module):
         self.use_cuda, rev=True, stack_next=self.stack_next)
     num_pairs = features.size()[0]
 
-    eps = nn_utils.to_var(torch.FloatTensor(num_pairs, batch_size).fill_(
-        np.exp(-10)), self.use_cuda)
-    # dim [num_pairs*batch_size, output_size] -> break dim
-    re_probs_list = self.binary_normalize(self.transition_model(features)).view(num_pairs, batch_size)
-    sh_log_probs_list = torch.log1p(-re_probs_list+eps)
-    re_rev_probs_list = self.binary_normalize(self.transition_model(rev_features)).view(num_pairs, batch_size)
-    re_rev_log_probs_list = torch.log(re_rev_probs_list+eps)
+    sh_log_probs_list = self.binary_log_normalize(-self.transition_model(features)).view(num_pairs, batch_size)
+    re_rev_log_probs_list = self.binary_log_normalize(self.transition_model(rev_features)).view(num_pairs, batch_size)
 
+    # dim [num_pairs*batch_size, output_size] -> break dim
     if self.embed_only_gen:
       gen_features = nn_utils.batch_feature_selection(encoder_features[0], 
           seq_length, self.use_cuda, stack_next=self.stack_next)
@@ -252,6 +154,7 @@ class ShiftReduceDP(nn.Module):
     final_score = re_rev_log_probs_list[get_rev_feature_index(0, sent_length)]
     return table[0, 0, sent_length] + final_score
 
+
   def _decode_action_sequence(self, encoder_features, word_ids, actions):
     """Execute a given action sequence, also find best relations."""
     # only store indexes on the stack
@@ -259,27 +162,17 @@ class ShiftReduceDP(nn.Module):
     buffer_index = 0
     sent_length = len(word_ids) - 1
 
-    transition_logits = []
     buffer_shift_dependents = [-1 for _ in word_ids] # stack top when generated
     stack_shift_dependents = [-1 for _ in word_ids] # interpret SH as (eager) RA
     reduce_dependents = [-1 for _ in word_ids]
 
     for action in actions:
-      transition_logit = None
-
       s0 = stack[-1] if len(stack) > 0 else 0
 
       if len(stack) > 1: # allowed to re
-        position = nn_utils.extract_feature_positions(buffer_index, s0,
-            stack_next=self.stack_next)
-        features = nn_utils.select_features(encoder_features[1], position, self.use_cuda)
-        
-        transition_logit = self.transition_model(features)
         if buffer_index == sent_length:
           assert action == data_utils._SRE
         
-      transition_logits.append(transition_logit)
-
       # excecute action
       if action == data_utils._SSH:
         if len(stack) > 0:
@@ -293,22 +186,24 @@ class ShiftReduceDP(nn.Module):
         child = stack.pop()
         reduce_dependents[child] = buffer_index
         
-    return transition_logits, actions, stack_shift_dependents
+    return actions, stack_shift_dependents
 
 
   def _viterbi_algorithm(self, encoder_features, word_ids):
     sent_length = len(word_ids) - 1
     seq_length = len(word_ids)
-    eps = np.exp(-10) # used to avoid division by 0
 
     # compute all sh/re and word probabilities
-    reduce_probs = np.zeros([seq_length, seq_length])
+    reduce_log_probs = np.zeros([seq_length, seq_length])
+    shift_log_probs = np.zeros([seq_length, seq_length])
     word_log_probs = np.empty([sent_length, sent_length])
     word_log_probs.fill(-np.inf)
 
     features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
         self.use_cuda, stack_next=self.stack_next)
-    re_probs_list = nn_utils.to_numpy(self.binary_normalize(self.transition_model(features)))
+    re_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.transition_model(features)))
+    sh_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.transition_model(features)))
+
     if self.embed_only_gen:
       gen_features = nn_utils.batch_feature_selection(encoder_features[0], 
           seq_length, self.use_cuda, stack_next=self.stack_next)
@@ -319,7 +214,8 @@ class ShiftReduceDP(nn.Module):
     counter = 0 
     for i in range(seq_length-1):
       for j in range(i+1, seq_length):
-        reduce_probs[i, j] = re_probs_list[counter, 0]
+        reduce_log_probs[i, j] = re_log_probs_list[counter, 0]
+        shift_log_probs[i, j] = sh_log_probs_list[counter, 0]
         if j < sent_length:
           word_log_probs[i, j] = nn_utils.to_numpy(
               word_distr_list[counter, word_ids[j if self.stack_next else j+1]])
@@ -341,7 +237,7 @@ class ShiftReduceDP(nn.Module):
 
     for j in range(2, sent_length+1):
       for i in range(j-1):
-        score = np.log(1 - reduce_probs[i, j-1] + eps) 
+        score = shift_log_probs[i, j-1]
         if self.word_model is not None:
           score += word_log_probs[i, j-1]
         table[i, j-1, j] = score
@@ -350,7 +246,7 @@ class ShiftReduceDP(nn.Module):
           block_scores = [] # adjust indexes after collecting scores
           block_directions = []
           for k in range(i+1, j):
-            score = table[l, i, k] + table[i, k, j] + np.log(reduce_probs[k, j] + eps)
+            score = table[l, i, k] + table[i, k, j] + reduce_log_probs[k, j]
             block_scores.append(score)
           ind = np.argmax(block_scores)
           k = ind + i + 1
@@ -375,7 +271,7 @@ class ShiftReduceDP(nn.Module):
     encoder_state = self.encoder_model.init_hidden(batch_size)
     encoder_features = self.encoder_model(sentence, encoder_state)
 
-    loss = -torch.sum(self._inside_algorithm_iterative_vectorized(
+    loss = -torch.sum(self._inside_algorithm(
         encoder_features, sentence, batch_size))
     return loss
 
