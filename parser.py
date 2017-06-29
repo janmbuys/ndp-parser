@@ -116,6 +116,8 @@ if __name__=='__main__':
                       help='use generative parser')
   parser.add_argument('--decompose_actions', action='store_true',
                       help='decompose action prediction to fit dynamic program')
+  parser.add_argument('--with_valency', action='store_true',
+                      help='use valency parameterization for arc-eager')
   parser.add_argument('--use_more_features', action='store_true',
                       help='use 4 instead of 2 features')
   parser.add_argument('--unsup', action='store_true',
@@ -189,8 +191,8 @@ if __name__=='__main__':
   #    [sent.conll for sent in dev_sentences])
 
   if args.small_data:
-    sentences = sentences[:100]  #temp: get no training baseline 
-    dev_sentences = dev_sentences[:100]
+    sentences = sentences[:30]  #temp: get no training baseline 
+    dev_sentences = dev_sentences[:30]
 
   val_sentences = test_sentences if args.test else dev_sentences
   if args.unsup:

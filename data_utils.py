@@ -192,6 +192,26 @@ def transition_to_str(action):
     return 'RE'
 
 
+def indicators_to_positions(index, num_indicators):
+  positions = None
+  if num_indicators == 1:
+    if index == 0: # (0)
+      positions = [0, 2, 1]
+    elif index == 1: # (1)
+      positions = [2, 0, 1]
+  elif num_indicators == 2:
+    if index == 0: # (0, 0)
+      positions = [0, 2, 1, 3]
+    elif index == 1: # (0, 1)
+      positions = [0, 2, 3, 1]
+    elif index == 2: # (1, 0)
+      positions = [2, 0, 1, 3]
+    elif index == 3: # (1, 1)
+      positions = [2, 0, 3, 1]
+  assert positions is not None, "Invalid indicator index"
+  return positions
+
+
 # Stanford/Berkeley parser UNK processing case 5 (English specific).
 # Source class: edu.berkeley.nlp.PCFGLA.SimpleLexicon
 def map_unk_class(word, is_sent_start, vocab, replicate_rnng=False):

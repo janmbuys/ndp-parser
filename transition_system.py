@@ -72,9 +72,9 @@ class TransitionSystem():
         
       if decompose_actions:
         self.transition_model = binary_classifier.BinaryClassifier(num_features, 
-          self.feature_size, hidden_size, non_lin, use_cuda) 
+          0, self.feature_size, hidden_size, non_lin, use_cuda) 
         self.direction_model = binary_classifier.BinaryClassifier(num_features, 
-          self.feature_size, hidden_size, non_lin, use_cuda) 
+          0, self.feature_size, hidden_size, non_lin, use_cuda) 
       else:
         self.transition_model = classifier.Classifier(num_features,
             num_indicators, self.feature_size, 

@@ -292,10 +292,12 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     #    self.transition_model(features)).view(num_items, 2, self.num_transitions))
 
     if self.decompose_actions:
-      re_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.transition_model(features)))
-      sh_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.transition_model(features)))
-      ra_dir_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.direction_model(features)))
-      sh_dir_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.direction_model(features)))
+      transition_logit = self.transition_model(features)
+      direction_logit = self.direction_model(features)
+      re_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(transition_logit))
+      sh_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-transition_logit))
+      ra_dir_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(direction_logit))
+      sh_dir_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-direction_logit))
     else: 
       tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
           self.transition_model(features)).view(num_items, self.num_transitions))
@@ -456,14 +458,17 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     #        num_items, 2, self.vocab_size)
 
     if self.decompose_actions:
+      transition_logit = self.transition_model(features)
+      direction_logit = self.direction_model(features)
+
       sh_log_probs_list = nn_utils.to_numpy(self.log_normalize(
-        -self.transition_model(features)).view(num_items))
+        -transition_logit).view(num_items))
       sh_ra_log_probs_list = nn_utils.to_numpy(self.log_normalize(
-        self.direction_model(features)).view(num_items)) + sh_log_probs_list
+        direction_logit).view(num_items)) + sh_log_probs_list
       sh_sh_log_probs_list = nn_utils.to_numpy(self.log_normalize(
-        -self.direction_model(features)).view(num_items)) + sh_log_probs_list
-      re_log_probs_list = nn_utils.to_numpy(self.log_normalize(self.transition_model(
-          features)).view(num_items))
+        -direction_logit).view(num_items)) + sh_log_probs_list
+      re_log_probs_list = nn_utils.to_numpy(self.log_normalize(
+        transition_logit).view(num_items))
     else:  
       tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
           self.transition_model(features)).view(num_items, self.num_transitions))

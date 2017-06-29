@@ -37,11 +37,7 @@ def log_sum_exp(vec, dim):
         torch.exp(vec - max_score_broadcast), dim))
 
 def select_features(input_features, indexes, use_cuda=False):
-  if use_cuda:
-    positions = Variable(torch.LongTensor(indexes)).cuda()
-  else:
-    positions = Variable(torch.LongTensor(indexes))
-  
+  positions = to_var(torch.LongTensor(indexes), use_cuda)
   return torch.index_select(input_features, 0, positions)
 
 def batch_feature_selection(input_features, seq_length, use_cuda=False,
@@ -59,12 +55,8 @@ def batch_feature_selection(input_features, seq_length, use_cuda=False,
         left_indexes.append(i)
         right_indexes.append(j-1 if stack_next else j)
 
-  if use_cuda:
-    left_positions = Variable(torch.LongTensor(left_indexes)).cuda()
-    right_positions = Variable(torch.LongTensor(right_indexes)).cuda()
-  else:
-    left_positions = Variable(torch.LongTensor(left_indexes))
-    right_positions = Variable(torch.LongTensor(right_indexes))
+  left_positions = to_var(torch.LongTensor(left_indexes), use_cuda)
+  right_positions = to_var(torch.LongTensor(right_indexes), use_cuda)
 
   left_selected_features = torch.index_select(input_features, 0,
       left_positions).view(-1, input_features.size(1), 1, input_features.size(2))
@@ -118,16 +110,10 @@ def filter_logits(logits, targets, float_var=False, use_cuda=False):
 
   #print(targets_filtered)
   if logits_filtered:
-    if use_cuda:
-      if float_var:
-        target_var = Variable(torch.FloatTensor(targets_filtered)).cuda()
-      else:  
-        target_var = Variable(torch.LongTensor(targets_filtered)).cuda()
-    else:
-      if float_var:
-        target_var = Variable(torch.FloatTensor(targets_filtered))
-      else:
-        target_var = Variable(torch.LongTensor(targets_filtered))
+    if float_var:
+      target_var = to_var(torch.FloatTensor(targets_filtered), use_cuda)
+    else:  
+      target_var = to_var(torch.LongTensor(targets_filtered), use_cuda)
 
     output = torch.cat(logits_filtered, 0)
     return output, target_var

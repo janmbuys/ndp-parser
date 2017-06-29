@@ -99,8 +99,8 @@ def decode(args, val_sentences, word_vocab, score=False):
     print('-' * 89)
   else: # not currently computing ppl here 
     out_name = args.working_dir + '/' + args.dev_name 
-    training_decode(val_sentences, stack_model, word_vocab, out_name + '.conll',
-        out_name + '.tr', use_cuda=args.cuda) 
+    training_decode(val_sentences, stack_model, word_vocab, out_name + '.output.conll',
+        out_name + '.output.tr', use_cuda=args.cuda) 
 
 
 def train(args, sentences, dev_sentences, word_vocab):
@@ -116,7 +116,8 @@ def train(args, sentences, dev_sentences, word_vocab):
     stack_model = arc_eager_dp.ArcEagerDP(vocab_size, args.embedding_size,
       args.hidden_size, args.num_layers, args.dropout,
       args.init_weight_range, args.stack_next, non_lin, gen_non_lin,
-      args.decompose_actions, args.embed_only, args.embed_only_gen, args.cuda)
+      args.decompose_actions, args.embed_only, args.embed_only_gen, 
+      args.with_valency, args.cuda)
   else:
     stack_model = shift_reduce_dp.ShiftReduceDP(vocab_size, args.embedding_size,
       args.hidden_size, args.num_layers, args.dropout,
@@ -140,7 +141,7 @@ def train(args, sentences, dev_sentences, word_vocab):
     epoch_start_time = time.time()
     
     random.shuffle(sentences)
-    sentences.sort(key=len) #, reverse=True) #temp 
+    sentences.sort(key=len, reverse=True) #temp 
     stack_model.train()
 
     total_loss = 0 
@@ -224,8 +225,8 @@ def train(args, sentences, dev_sentences, word_vocab):
 
     # Decoding
     out_name = args.working_dir + '/' + args.dev_name + '.' + str(epoch) 
-    training_decode(dev_sentences, stack_model, word_vocab, out_name + '.conll',
-        out_name + '.tr', use_cuda=args.cuda)
+    training_decode(dev_sentences, stack_model, word_vocab, out_name + '.output.conll',
+        out_name + '.output.tr', use_cuda=args.cuda)
     
     # Anneal the learning rate.
     if (not args.adam and args.num_init_lr_epochs > 0 

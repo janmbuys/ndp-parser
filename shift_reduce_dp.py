@@ -35,7 +35,7 @@ class ShiftReduceDP(nn.Module):
 
     feature_size = hidden_size
     self.transition_model = binary_classifier.BinaryClassifier(num_features, 
-        feature_size, hidden_size, non_lin, use_cuda) 
+        0, feature_size, hidden_size, non_lin, use_cuda) 
     self.word_model = classifier.Classifier(num_features, 0, feature_size,
          hidden_size, vocab_size, gen_non_lin, use_cuda)
 

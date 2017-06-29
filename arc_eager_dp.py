@@ -20,7 +20,7 @@ class ArcEagerDP(nn.Module):
   def __init__(self, vocab_size, embedding_size, hidden_size, num_layers,
                dropout, init_weight_range, non_lin, gen_non_lin,
                decompose_actions, stack_next, embed_only, embed_only_gen, 
-               use_cuda):
+               with_valency, use_cuda):
     super(ArcEagerDP, self).__init__()
     self.use_cuda = use_cuda
     self.stack_next = stack_next
@@ -28,6 +28,7 @@ class ArcEagerDP(nn.Module):
     self.embed_only_gen = embed_only_gen
     self.decompose_actions = decompose_actions
     self.num_transitions = 3
+    self.with_valency = with_valency
     num_features = 2
 
     if embed_only:
@@ -38,18 +39,21 @@ class ArcEagerDP(nn.Module):
           hidden_size, num_layers, dropout, init_weight_range, bidirectional=False, use_cuda=use_cuda)
 
     feature_size = hidden_size
-    # TODO for now don't decompose actions
     if decompose_actions:
       self.transition_model = binary_classifier.BinaryClassifier(num_features,
-          feature_size, hidden_size, non_lin, use_cuda) # sh/re
+          1 if with_valency else 0, feature_size, hidden_size, non_lin, 
+          use_cuda) # sh/re
       self.direction_model = binary_classifier.BinaryClassifier(num_features,
-          feature_size, hidden_size, non_lin, use_cuda) # sh/ra 
+          1 if with_valency else 0, feature_size, hidden_size, non_lin, 
+          use_cuda) # sh/ra 
     else:
-      self.transition_model = classifier.Classifier(num_features, 0, 
-          feature_size, hidden_size, self.num_transitions, non_lin, use_cuda) 
+      self.transition_model = classifier.Classifier(num_features, 
+          1 if with_valency else 0, feature_size, hidden_size, 
+          self.num_transitions, non_lin, use_cuda) 
 
-    self.word_model = classifier.Classifier(num_features, 0, feature_size,
-         hidden_size, vocab_size, gen_non_lin, use_cuda)
+    self.word_model = classifier.Classifier(num_features, 
+        2 if with_valency else 0, feature_size, hidden_size, vocab_size, 
+        gen_non_lin, use_cuda)
 
     self.log_normalize = nn.LogSoftmax()
     self.binary_log_normalize = nn.LogSigmoid()
@@ -65,30 +69,61 @@ class ArcEagerDP(nn.Module):
     rev_features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
         self.use_cuda, rev=True, stack_next=self.stack_next)
     num_items = features.size()[0]
-
-    # dim [num_items, batch_size, output_size]
-    if self.decompose_actions:
-      sh_log_probs_list = self.log_normalize(self.transition_model(-features)
-          ).view(num_items, batch_size)
-      sh_ra_log_probs_list = self.log_normalize(self.direction_model(features)
-          ).view(num_items, batch_size) + sh_log_probs_list
-      sh_sh_log_probs_list = self.log_normalize(self.direction_model(-features)
-          ).view(num_items, batch_size) + sh_log_probs_list
-      re_rev_log_probs_list = self.log_normalize(self.transition_model(
-          rev_features)).view(num_items, batch_size)
-    else:  
-      tr_log_probs_list = self.log_normalize(self.transition_model(features)).view(
-          num_items, batch_size, self.num_transitions)
-      re_rev_log_probs_list = self.log_normalize(self.transition_model(
-          rev_features)).view(num_items, batch_size, self.num_transitions)[:,:,data_utils._ERE]
-
     if self.embed_only_gen:
       gen_features = nn_utils.batch_feature_selection(encoder_features[0], 
           seq_length, self.use_cuda, stack_next=self.stack_next)
-      word_distr_list = self.log_normalize(self.word_model(gen_features)).view(
-          num_items, batch_size, -1)
     else:
-      word_distr_list = self.log_normalize(self.word_model(features)).view(
+      gen_features = features
+
+    if self.with_valency:
+      if self.decompose_actions:
+        re_log_probs_list = []
+        sh_log_probs_list = []
+        ra_dir_log_probs_list = []
+        sh_dir_log_probs_list = []
+
+        for c in range(2): 
+          transition_logit = self.transition_model(features, c)
+          direction_logit = self.direction_model(features, c)
+          sh_log_probs_list = self.log_normalize(-transition_logit).view(num_items, batch_size)
+          sh_ra_log_probs_list = self.log_normalize(direction_logit).view(num_items, batch_size) + sh_log_probs_list
+          sh_sh_log_probs_list = self.log_normalize(-direction_logit).view(num_items, batch_size) + sh_log_probs_list
+
+          re_rev_log_probs_list = self.log_normalize(self.transition_model(
+              rev_features, c)).view(num_items, batch_size)
+      else:  
+        tr_log_probs_list = []
+        re_rev_log_probs_list = []
+        for c in range(2):
+          tr_log_probs_list.append(self.log_normalize(self.transition_model(
+              features, c)).view(num_items, batch_size, self.num_transitions))
+          re_rev_log_probs_list.append(self.log_normalize(
+            self.transition_model(rev_features, c)).view(num_items, 
+              batch_size, self.num_transitions)[:,:,data_utils._ERE])
+
+      word_distr_list = []
+      for ind in range(4):
+        word_distr_list.append(self.log_normalize(self.word_model(
+            gen_features, ind)).view(num_items, batch_size, -1))
+
+    else:
+      if self.decompose_actions:
+        transition_logit = self.transition_model(features)
+        direction_logit = self.direction_model(features)
+        sh_log_probs_list = self.log_normalize(-transition_logit).view(num_items, batch_size)
+        sh_ra_log_probs_list = self.log_normalize(direction_logit).view(num_items, batch_size) + sh_log_probs_list
+        sh_sh_log_probs_list = self.log_normalize(-direction_logit).view(num_items, batch_size) + sh_log_probs_list
+
+        re_rev_log_probs_list = self.log_normalize(self.transition_model(
+            rev_features)).view(num_items, batch_size)
+      else:  
+        # dim [num_items, batch_size, output_size]
+        tr_log_probs_list = self.log_normalize(self.transition_model(features)).view(
+            num_items, batch_size, self.num_transitions)
+        re_rev_log_probs_list = self.log_normalize(self.transition_model(
+            rev_features)).view(num_items, batch_size, self.num_transitions)[:,:,data_utils._ERE]
+
+      word_distr_list = self.log_normalize(self.word_model(gen_features)).view(
           num_items, batch_size, -1)
 
     # enumerate indexes
@@ -122,20 +157,43 @@ class ArcEagerDP(nn.Module):
     # word probs
     if self.stack_next:
       table[0, 0, 0, 0, 1] = nn_utils.to_var(torch.FloatTensor(batch_size).fill_(0), self.use_cuda)
-    else:
+    else: #TODO
       init_features = nn_utils.select_features(encoder_features[1], [0, 0], self.use_cuda)
-      init_word_dist = self.log_normalize(self.word_model(init_features))
-      table[0, 0, 0, 0, 1] = torch.gather(init_word_dist, 1,
+      if self.with_valency:
+        init_word_logit = self.word_model(init_features, 0)
+      else:
+        init_word_logit = self.word_model(init_features)
+      init_word_distr = self.log_normalize(init_word_logit)
+      table[0, 0, 0, 0, 1] = torch.gather(init_word_distr, 1,
                                           sentence[1].view(-1, 1))
 
     # could potentially parallize over i, but may not be worth it
     for i in range(sent_length-1): 
       for j in range(i+1, sent_length):
         index = get_feature_index(i, j)
-        word_prob = torch.gather(word_distr_list[index], 1,
-            sentence[j if self.stack_next else j+1].view(-1, 1))
+        if self.with_valency:
+          for c in range(2):
+            word_prob0 = torch.gather(word_distr_list[2*c][index], 1,
+                sentence[j if self.stack_next else j+1].view(-1, 1))
+            word_prob1 = torch.gather(word_distr_list[2*c+1][index], 1,
+                sentence[j if self.stack_next else j+1].view(-1, 1))
 
-        for c in range(2):
+            if self.decompose_actions:
+              table[i, c, j, 0, j+1] = (sh_sh_log_probs_list[c][index] 
+                                        + word_prob0)
+              table[i, c, j, 1, j+1] = (sh_ra_log_probs_list[c][index] 
+                                        + word_prob1)
+            else:
+              table[i, c, j, 0, j+1] = (tr_log_probs_list[c][index, :, data_utils._ESH]
+                  + word_prob0)
+              table[i, c, j, 1, j+1] = (tr_log_probs_list[c][index, :, data_utils._ERA]
+                  + word_prob1)
+
+        else:
+          word_prob = torch.gather(word_distr_list[index], 1,
+              sentence[j if self.stack_next else j+1].view(-1, 1))
+
+          for c in range(2):
             if self.decompose_actions:
               table[i, c, j, 0, j+1] = sh_sh_log_probs_list[index] + word_prob
               table[i, c, j, 1, j+1] = sh_ra_log_probs_list[index] + word_prob
@@ -152,12 +210,20 @@ class ArcEagerDP(nn.Module):
 
         start_ind = get_rev_feature_index(i+1, j)
         end_ind = get_rev_feature_index(j-1, j) + 1
-        re_probs = re_rev_log_probs_list[start_ind:end_ind]
          
         scores = nn_utils.to_var(torch.FloatTensor(1, 1, h, gap-1, 2, batch_size), self.cuda)
-        for c in range(h): # need loop because we can't expand re_probs
-          scores[0, 0, c, :, 0] = table[i, c, i+1:j, 0, j] + re_probs
-          scores[0, 0, c, :, 1] = table[i, c, i+1:j, 1, j] + re_probs
+
+        if self.with_valency:
+          for c in range(h):
+            scores[0, 0, c, :, 0] = (table[i, c, i+1:j, 0, j] 
+                + re_rev_log_probs_list[0][start_ind:end_ind])
+            scores[0, 0, c, :, 1] = (table[i, c, i+1:j, 1, j]
+                + re_rev_log_probs_list[1][start_ind:end_ind])
+        else:
+          re_probs = re_rev_log_probs_list[start_ind:end_ind]
+          for c in range(h): # need loop because we can't expand re_probs
+            scores[0, 0, c, :, 0] = table[i, c, i+1:j, 0, j] + re_probs
+            scores[0, 0, c, :, 1] = table[i, c, i+1:j, 1, j] + re_probs
 
         # dim [1, 1, h, gap-1, batch_size]
         if j == sent_length:
@@ -231,48 +297,94 @@ class ArcEagerDP(nn.Module):
     shift_log_probs = np.zeros([seq_length, seq_length, 2])
     ra_log_probs = np.zeros([seq_length, seq_length, 2])
     re_log_probs = np.zeros([seq_length, seq_length, 2])
-    word_log_probs = np.empty([sent_length, sent_length, 2])
+    word_log_probs = np.empty([sent_length, sent_length, 4])
     word_log_probs.fill(-np.inf)
 
     # batch feature computation
-    # TODO worry about expanded features etc later
     features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
         self.use_cuda, stack_next=self.stack_next)
     num_items = features.size()[0]
 
-    if self.decompose_actions:
-      re_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.transition_model(features)))
-      sh_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.transition_model(features)))
-      ra_dir_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.direction_model(features)))
-      sh_dir_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.direction_model(features)))
-    else:
-      tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
-          self.transition_model(features)).view(num_items, self.num_transitions))
-
     if self.embed_only_gen:
-      gen_features = nn_utils.batch_feature_selection(encoder_features[0], 
-          seq_length, self.use_cuda, stack_next=self.stack_next)
+       gen_features = nn_utils.batch_feature_selection(encoder_features[0], 
+           seq_length, self.use_cuda, stack_next=self.stack_next)
+    else:
+      gen_features = features
+
+    if self.with_valency:
+      if self.decompose_actions:
+        re_log_probs_list = []
+        sh_log_probs_list = []
+        ra_dir_log_probs_list = []
+        sh_dir_log_probs_list = []
+
+        for c in range(2): 
+          transition_logit = self.transition_model(features, c)
+          direction_logit = self.direction_model(features, c)
+          re_log_probs_list.append(nn_utils.to_numpy(self.binary_log_normalize(transition_logit)))
+          sh_log_probs_list.append(nn_utils.to_numpy(self.binary_log_normalize(-transition_logit)))
+          ra_dir_log_probs_list.append(nn_utils.to_numpy(self.binary_log_normalize(direction_logit)))
+          sh_dir_log_probs_list.append(nn_utils.to_numpy(self.binary_log_normalize(-direction_logit)))
+      else:
+        tr_log_probs_list = []
+        for c in range(2):
+          tr_log_probs_list.append(nn_utils.to_numpy(self.log_normalize(
+              self.transition_model(features, c)).view(num_items,
+                  self.num_transitions)))
+      
+      word_distr_list = []
+      for ind in range(4):
+        word_distr_list.append(self.log_normalize(self.word_model(
+            gen_features, ind)).view(num_items, -1))
+    else:
+      if self.decompose_actions:
+        transition_logit = self.transition_model(features)
+        direction_logit = self.direction_model(features)
+        re_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(transition_logit))
+        sh_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-transition_logit))
+        ra_dir_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(direction_logit))
+        sh_dir_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-direction_logit))
+      else:
+        tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
+            self.transition_model(features)).view(num_items, self.num_transitions))
+
       word_distr_list = self.log_normalize(self.word_model(gen_features)).view(num_items, -1)
-    else:        
-      word_distr_list = self.log_normalize(self.word_model(features)).view(num_items, -1)
 
     counter = 0 
     for i in range(seq_length-1):
       for j in range(i+1, seq_length):
         for c in range(2):
-          if self.decompose_actions:
-            shift_log_probs[i, j] = (sh_log_probs_list[counter] 
-                                     + sh_dir_log_probs_list[counter])
-            ra_log_probs[i, j] = (sh_log_probs_list[counter] 
-                                  + ra_dir_log_probs_list[counter])
-            re_log_probs[i, j] = re_log_probs_list[counter] 
+          if self.with_valency:
+            if self.decompose_actions:
+              shift_log_probs[i, j, c] = (sh_log_probs_list[c][counter] 
+                                       + sh_dir_log_probs_list[c][counter])
+              ra_log_probs[i, j, c] = (sh_log_probs_list[c][counter] 
+                                    + ra_dir_log_probs_list[c][counter])
+              re_log_probs[i, j, c] = re_log_probs_list[c][counter] 
+            else:
+              shift_log_probs[i, j, c] = tr_log_probs_list[c][counter, data_utils._ESH]
+              ra_log_probs[i, j, c] = tr_log_probs_list[c][counter, data_utils._ERA]
+              re_log_probs[i, j, c] = tr_log_probs_list[c][counter, data_utils._ERE]
           else:
-            shift_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ESH]
-            ra_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ERA]
-            re_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ERE]
+            if self.decompose_actions:
+              shift_log_probs[i, j, c] = (sh_log_probs_list[counter] 
+                                       + sh_dir_log_probs_list[counter])
+              ra_log_probs[i, j, c] = (sh_log_probs_list[counter] 
+                                    + ra_dir_log_probs_list[counter])
+              re_log_probs[i, j, c] = re_log_probs_list[counter] 
+            else:
+              shift_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ESH]
+              ra_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ERA]
+              re_log_probs[i, j, c] = tr_log_probs_list[counter, data_utils._ERE]
+            
+        for ind in range(4):
           if j < sent_length:
-            word_log_probs[i, j, c] = nn_utils.to_numpy(
-                word_distr_list[counter, word_ids[j if self.stack_next else j+1]])
+            if self.with_valency:
+              word_log_probs[i, j, ind] = nn_utils.to_numpy(
+                  word_distr_list[ind][counter, word_ids[j if self.stack_next else j+1]])
+            else:
+              word_log_probs[i, j, ind] = nn_utils.to_numpy(
+                  word_distr_list[counter, word_ids[j if self.stack_next else j+1]])
         counter += 1
 
     table_size = len(word_ids)
@@ -291,18 +403,21 @@ class ArcEagerDP(nn.Module):
     else:
       init_features = nn_utils.select_features(encoder_features[1], [0, 0], 
                                                self.use_cuda)
-      init_word_dist = self.log_normalize(self.word_model(init_features).view(-1))
+      if self.with_valency:
+        init_word_logit = self.word_model(init_features, 0)
+      else:
+        init_word_logit = self.word_model(init_features)
+      init_word_dist = self.log_normalize(init_word_logit.view(-1))
       table[0, 0, 0, 0, 1] = nn_utils.to_numpy(init_word_dist[word_ids[1]])
     
     # word probs
     for i in range(sent_length-1):
       for j in range(i+1, sent_length):
         for c in range(2):
-          table[i, c, j, 0, j+1] = shift_log_probs[i, j, c] 
-          table[i, c, j, 1, j+1] = ra_log_probs[i, j, c] 
-          if self.word_model is not None:
-            table[i, c, j, 0, j+1] += word_log_probs[i, j, c]
-            table[i, c, j, 1, j+1] += word_log_probs[i, j, c]
+          table[i, c, j, 0, j+1] = (shift_log_probs[i, j, c] 
+                                    + word_log_probs[i, j, 2*c])
+          table[i, c, j, 1, j+1] = (ra_log_probs[i, j, c] 
+                                    + word_log_probs[i, j, 2*c+1])
 
     for gap in range(2, sent_length+1):
       for i in range(sent_length+1-gap):
