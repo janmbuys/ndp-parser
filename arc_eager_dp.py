@@ -78,19 +78,22 @@ class ArcEagerDP(nn.Module):
     if self.with_valency:
       if self.decompose_actions:
         re_log_probs_list = []
-        sh_log_probs_list = []
-        ra_dir_log_probs_list = []
-        sh_dir_log_probs_list = []
+        sh_ra_log_probs_list = []
+        sh_sh_log_probs_list = []
+        re_rev_log_probs_list = []
 
         for c in range(2): 
           transition_logit = self.transition_model(features, c)
           direction_logit = self.direction_model(features, c)
-          sh_log_probs_list = self.log_normalize(-transition_logit).view(num_items, batch_size)
-          sh_ra_log_probs_list = self.log_normalize(direction_logit).view(num_items, batch_size) + sh_log_probs_list
-          sh_sh_log_probs_list = self.log_normalize(-direction_logit).view(num_items, batch_size) + sh_log_probs_list
+          sh_log_probs_list = self.log_normalize(-transition_logit).view(
+              num_items, batch_size)
+          sh_ra_log_probs_list.append(self.log_normalize(direction_logit).view(num_items,
+            batch_size) + sh_log_probs_list)
+          sh_sh_log_probs_list.append(self.log_normalize(-direction_logit).view(num_items,
+            batch_size) + sh_log_probs_list)
 
-          re_rev_log_probs_list = self.log_normalize(self.transition_model(
-              rev_features, c)).view(num_items, batch_size)
+          re_rev_log_probs_list.append(self.log_normalize(self.transition_model(
+              rev_features, c)).view(num_items, batch_size))
       else:  
         tr_log_probs_list = []
         re_rev_log_probs_list = []
