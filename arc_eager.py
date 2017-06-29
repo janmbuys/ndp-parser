@@ -25,7 +25,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
     num_transitions = 3
     num_features = 2 # TODO not including headed feature
     super(ArcEagerTransitionSystem, self).__init__(vocab_size, num_relations,
-        num_features, num_transitions, 1, 2, embedding_size, hidden_size, 
+        num_features, num_transitions, 0, 0, embedding_size, hidden_size, 
         num_layers, dropout, init_weight_range, bidirectional, non_lin,
         gen_non_lin, predict_relations, generative, decompose_actions, 
         embed_only, stack_next, batch_size, use_cuda, model_path, load_model)

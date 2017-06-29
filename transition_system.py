@@ -77,20 +77,20 @@ class TransitionSystem():
           0, self.feature_size, hidden_size, non_lin, use_cuda) 
       else:
         self.transition_model = classifier.Classifier(num_features,
-            num_indicators, self.feature_size, 
+            0, self.feature_size, 
           hidden_size, num_transitions, non_lin, use_cuda) 
         self.direction_model = None
 
       if predict_relations: #TODO use extended feature space
         self.relation_model = classifier.Classifier(num_features,
-            num_indicators, self.feature_size, 
+            0, self.feature_size, 
             hidden_size, num_relations, non_lin, use_cuda)
       else:
         self.relation_model = None
         
       if generative:
         self.word_model = classifier.Classifier(num_features,
-            num_gen_indicators, self.feature_size,
+            0, self.feature_size,
             hidden_size, vocab_size, gen_non_lin, use_cuda)
       else:
         self.word_model = None
