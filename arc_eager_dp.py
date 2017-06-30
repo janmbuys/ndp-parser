@@ -238,7 +238,7 @@ class ArcEagerDP(nn.Module):
                         temp_right.expand(max(i,1), h, h, gap-1, batch_size))
 
         table[0:max(i,1), 0:h, i, 0:h, j] = nn_utils.log_sum_exp(block_scores, 3)
-    return table[0, 0, 0, 0, sent_length] 
+    return table[0, 0, 0, 0, sent_length] #TODO calculate final reduce prob
 
 
   def _decode_action_sequence(self, encoder_features, word_ids, actions):

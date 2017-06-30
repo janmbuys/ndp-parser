@@ -115,8 +115,8 @@ def train(args, sentences, dev_sentences, word_vocab):
   if args.arc_eager:
     stack_model = arc_eager_dp.ArcEagerDP(vocab_size, args.embedding_size,
       args.hidden_size, args.num_layers, args.dropout,
-      args.init_weight_range, args.stack_next, non_lin, gen_non_lin,
-      args.decompose_actions, args.embed_only, args.embed_only_gen, 
+      args.init_weight_range, non_lin, gen_non_lin, args.decompose_actions, 
+      args.stack_next, args.embed_only, args.embed_only_gen, 
       args.with_valency, args.cuda)
   else:
     stack_model = shift_reduce_dp.ShiftReduceDP(vocab_size, args.embedding_size,
