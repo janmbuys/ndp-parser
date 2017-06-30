@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 
 import data_utils
+import nn_utils
 
 class BinaryClassifier(nn.Module):
   """Module with binary classifier for parsing."""

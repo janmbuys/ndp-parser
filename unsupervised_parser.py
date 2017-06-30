@@ -141,7 +141,7 @@ def train(args, sentences, dev_sentences, word_vocab):
     epoch_start_time = time.time()
     
     random.shuffle(sentences)
-    sentences.sort(key=len, reverse=True) #temp 
+    sentences.sort(key=len) #, reverse=True) #temp 
     stack_model.train()
 
     total_loss = 0 
