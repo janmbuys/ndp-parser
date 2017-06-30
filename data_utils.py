@@ -540,11 +540,8 @@ def read_sentences_given_vocab(conll_path, conll_name, working_path,
       sentences.append(ParseSentence.from_vocab_conll(sentence, word_vocab,
         max_length))
 
-  txt_filename = working_path + conll_name + '.txt'
-  txt_path = Path(txt_filename)
-  if not txt_path.is_file():
-    write_text(txt_filename, sentences)
-    write_conll_gold_norm(working_path + conll_name + '.conll', conll_sentences)
+  write_text(working_path + conll_name + '.txt', sentences)
+  write_conll_gold_norm(working_path + conll_name + '.conll', conll_sentences)
 
   return (sentences,
           word_vocab,
@@ -583,10 +580,10 @@ def write_conll_baseline(fn, conll_gen):
     for sentence in conll_gen:
       for i, entry in enumerate(sentence):
         if i > 0:
-          if entry.parent_id > entry.id:
-            pred_parent = entry.id + 1
-          else:
-            pred_parent = entry.id - 1
+          #if entry.parent_id > entry.id:
+          #  pred_parent = entry.id + 1
+          #else:
+          pred_parent = entry.id - 1
           fh.write('\t'.join([str(entry.id), entry.form, '_', entry.cpos,
             entry.pos, '_', str(pred_parent), '_', '_', '_']))
           fh.write('\n')

@@ -75,7 +75,7 @@ if __name__=='__main__':
       use_unk_classes = not args.no_unk_classes,
       replicate_rnng=args.replicate_rnng_data)
 
-  #data_utils.write_conll_baseline(data_working_path + 'dev.baseline.conll', 
-  #    [sent.conll for sent in dev_sentences])
+  data_utils.write_conll_baseline(data_working_path + 'dev.baseline.conll', 
+      [sent.conll for sent in dev_sentences])
 
 
