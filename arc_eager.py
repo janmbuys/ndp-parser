@@ -461,13 +461,13 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
       transition_logit = self.transition_model(features)
       direction_logit = self.direction_model(features)
 
-      sh_log_probs_list = nn_utils.to_numpy(self.log_normalize(
+      sh_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(
         -transition_logit).view(num_items))
-      sh_ra_log_probs_list = nn_utils.to_numpy(self.log_normalize(
+      sh_ra_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(
         direction_logit).view(num_items)) + sh_log_probs_list
-      sh_sh_log_probs_list = nn_utils.to_numpy(self.log_normalize(
+      sh_sh_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(
         -direction_logit).view(num_items)) + sh_log_probs_list
-      re_log_probs_list = nn_utils.to_numpy(self.log_normalize(
+      re_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(
         transition_logit).view(num_items))
     else:  
       tr_log_probs_list = nn_utils.to_numpy(self.log_normalize(
