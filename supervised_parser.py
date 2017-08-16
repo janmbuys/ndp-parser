@@ -93,7 +93,7 @@ def training_decode(args, tr_system, val_sentences, rel_vocab, epoch=-1):
   file_id = '.' + str(epoch) if epoch >= 0 else ''
   data_utils.write_conll(working_path + args.dev_name + file_id + '.output.conll', conll_predicted)
   # this loss is with respect to the selected parse
-  return total_loss, total_length, total_length_more
+  return -total_loss[0], total_length, total_length_more
 
 
 def training_score(args, tr_system, val_sentences):
@@ -163,8 +163,8 @@ def decode(args, val_sentences, word_vocab, pos_vocab, rel_vocab, score=False):
     total_loss, total_length, total_length_more = training_decode(args,
         tr_system, val_sentences, rel_vocab)
 
-  val_loss = total_loss[0] / total_length
-  val_loss_more = total_loss[0] / total_length_more
+  val_loss = - total_loss / total_length
+  val_loss_more = - total_loss / total_length_more
 
   print('-' * 89)
   print('| decoding time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
@@ -379,8 +379,8 @@ def train(args, sentences, dev_sentences, word_vocab, pos_vocab, rel_vocab):
       decode_start_time = time.time()
       total_loss, total_length, total_length_more = training_decode(args, 
           tr_system, dev_sentences, rel_vocab, epoch)
-      val_loss = total_loss[0] / total_length
-      val_loss_more = total_loss[0] / total_length_more
+      val_loss = total_loss / total_length
+      val_loss_more = total_loss / total_length_more
 
       print('-' * 89)
       print('| end of epoch {:3d} | time: {:5.2f}s | {:5d} tokens | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
@@ -416,7 +416,7 @@ def train(args, sentences, dev_sentences, word_vocab, pos_vocab, rel_vocab):
         lr = lr / args.lr_decay
       for param_group in optimizer.param_groups:
         param_group['lr'] = lr
-    if prev_val_loss and val_loss > prev_val_loss:
+    if args.generative and prev_val_loss and val_loss > prev_val_loss:
       patience_count += 1
     else:
       patience_count = 0

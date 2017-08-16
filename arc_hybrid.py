@@ -94,8 +94,8 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
           la_log_probs[i, j] = tr_log_probs_list[counter, data_utils._LA]
           ra_log_probs[i, j] = tr_log_probs_list[counter, data_utils._RA]
         if self.word_model is not None and j < sent_length:
-          if j < sent_length - 1:
-            word_id = conll[j+1].word_id 
+          if j < sent_length - 1 or self.stack_next:
+            word_id = conll[j if self.stack_next else j+1].word_id 
           else:
             word_id = data_utils._EOS
           word_log_probs[i, j] = nn_utils.to_numpy(word_dist[counter, word_id])
@@ -109,7 +109,7 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
     directions.fill(data_utils._DRA) # default direction
 
     # first word prob 
-    if self.word_model is not None:
+    if self.word_model is not None and not self.stack_next:
       if self.embed_only_gen:
         init_features = nn_utils.select_features(encoder_features[0], [0, 0], self.use_cuda)
       else:
@@ -192,7 +192,7 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
       s2 = stack.roots[-3].id if len(stack) > 2 else 0
 
       position = nn_utils.extract_feature_positions(buffer_index, s0, s1, s2,
-          self.more_context)
+          self.more_context, stack_next=self.stack_next)
       features = nn_utils.select_features(encoder_features[1], position, self.use_cuda)
 
       if len(stack) > 1: # allowed to ra or la
@@ -254,8 +254,8 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
         else:
           word_logit = self.word_model(features)
         gen_word_logits.append(word_logit)
-        if buffer_index+1 < sent_length:
-          word = conll[buffer_index+1].word_id
+        if buffer_index+1 < sent_length or self.stack_next:
+          word = conll[buffer_index if self.stack_next else buffer_index+1].word_id
         else:
           word = data_utils._EOS
       else:
@@ -342,8 +342,8 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
               tr_log_probs_list[counter, data_utils._LA], 
               tr_log_probs_list[counter, data_utils._RA])
         if j < sent_length:
-          if j < sent_length - 1:
-            word_id = conll[j+1].word_id 
+          if j < sent_length - 1 or self.stack_next:
+            word_id = conll[j if self.stack_next else j+1].word_id 
           else:
             word_id = data_utils._EOS
           word_log_probs[i, j] = nn_utils.to_numpy(word_dist[counter, word_id])
@@ -354,9 +354,12 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
     table.fill(-np.inf) # log probabilities
 
     # first word prob 
-    init_features = nn_utils.select_features(encoder_features[1], [0, 0], self.use_cuda)
-    word_dist = self.log_normalize(self.word_model(init_features).view(-1))
-    table[0, 0, 1] = nn_utils.to_numpy(word_dist[conll[1].word_id])
+    if self.stack_next:
+      table[0, 0, 1] = 0
+    else:
+      init_features = nn_utils.select_features(encoder_features[1], [0, 0], self.use_cuda)
+      word_dist = self.log_normalize(self.word_model(init_features).view(-1))
+      table[0, 0, 1] = nn_utils.to_numpy(word_dist[conll[1].word_id])
 
     for j in range(2, sent_length+1):
       for i in range(j-1):
@@ -409,8 +412,8 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
 
       label = -1 if action == data_utils._SH else stack.roots[-1].relation_id
       if action == data_utils._SH:
-        if buffer_index+1 < sent_length:
-          word = conll[buffer_index+1].word_id
+        if buffer_index+1 < sent_length or self.stack_next:
+          word = conll[buffer_index if self.stack_next else buffer_index+1].word_id
         else:
           word = data_utils._EOS
       else:
@@ -473,7 +476,7 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
               action = data_utils._RA 
    
       position = nn_utils.extract_feature_positions(buffer_index, s0, s1, s2,
-          self.more_context) 
+          self.more_context, stack_next=self.stack_next) 
       feature = nn_utils.select_features(encoder_features[1], position, self.use_cuda)
       features.append(feature)
       if self.embed_only_gen:
@@ -483,8 +486,8 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
        
       label = -1 if action == data_utils._SH else stack.roots[-1].relation_id
       if action == data_utils._SH:
-        if buffer_index+1 < sent_length:
-          word = conll[buffer_index+1].word_id
+        if buffer_index+1 < sent_length or self.stack_next:
+          word = conll[buffer_index if self.stack_next else buffer_index+1].word_id
         else:
           word = data_utils._EOS
       else:

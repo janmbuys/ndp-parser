@@ -126,7 +126,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
       label = -1
       s0 = stack.roots[-1].id if len(stack) > 0 else 0
 
-      position = nn_utils.extract_feature_positions(buffer_index, s0)
+      position = nn_utils.extract_feature_positions(buffer_index, s0, stack_next=self.stack_next)
       features = nn_utils.select_features(encoder_features[1], position, self.use_cuda)
       #head_ind = torch.LongTensor([1 if stack_has_parent and stack_has_parent[-1] else 0]).view(1, 1)
       # head_feat = self.embed_headed(nn_utils.to_var(head_ind, self.use_cuda)) 
@@ -597,7 +597,8 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
           elif len(stack.roots[-1].children) == num_children[s0]:
             action = data_utils._RE 
 
-      position = nn_utils.extract_feature_positions(buffer_index, s0) 
+      position = nn_utils.extract_feature_positions(buffer_index, s0,
+          stack_next=self.stack_next) 
       feature = nn_utils.select_features(encoder_features[1], position, self.use_cuda)
      
       #head_ind = torch.LongTensor([1 if stack_has_parent and stack_has_parent[-1] else 0]).view(1, 1)

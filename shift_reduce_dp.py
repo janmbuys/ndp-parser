@@ -216,7 +216,7 @@ class ShiftReduceDP(nn.Module):
       for j in range(i+1, seq_length):
         reduce_log_probs[i, j] = re_log_probs_list[counter, 0]
         shift_log_probs[i, j] = sh_log_probs_list[counter, 0]
-        if j < sent_length:
+        if j < sent_length or self.stack_next:
           word_log_probs[i, j] = nn_utils.to_numpy(
               word_distr_list[counter, word_ids[j if self.stack_next else j+1]])
         counter += 1
