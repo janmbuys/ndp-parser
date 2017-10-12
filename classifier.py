@@ -12,7 +12,7 @@ class Classifier(nn.Module):
   """Module with classifier for parsing."""
 
   def __init__(self, num_features, num_indicators, feature_size, hidden_size, 
-      output_size, non_lin, use_cuda):
+      output_size, non_lin, multiplicative_combination, use_cuda):
     super(Classifier, self).__init__()
     self.use_cuda = use_cuda
     self.non_lin = non_lin
@@ -20,8 +20,12 @@ class Classifier(nn.Module):
     self.feature_size = feature_size
     assert num_indicators >= 0 and num_indicators <= 2
     self.num_indicators = num_indicators
-
-    self.encode_size = feature_size*(num_features + num_indicators)
+    self.multiplicative_combination = multiplicative_combination
+    if self.multiplicative_combination:
+      assert num_features == 2 and num_indicators == 0
+      self.encode_size = feature_size
+    else: 
+      self.encode_size = feature_size*(num_features + num_indicators)
     self.encode = nn.Linear(self.encode_size, hidden_size)
     self.project = nn.Linear(hidden_size, output_size)
     self.init_weights()
@@ -46,6 +50,9 @@ class Classifier(nn.Module):
       positions_var = nn_utils.to_var(torch.LongTensor(positions), self.use_cuda)
       flat_features = torch.index_select(cat_features, 1, positions_var).view(-1,
           self.encode_size)
+    elif self.multiplicative_combination:
+      col_features = features.view(-1, self.num_features, self.feature_size)
+      flat_features = col_features[:,0,:] * col_features[:,1,:]
     else:
       flat_features = features.view(-1, self.encode_size)
 

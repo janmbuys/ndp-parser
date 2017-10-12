@@ -37,7 +37,7 @@ class ShiftReduceDP(nn.Module):
     self.transition_model = binary_classifier.BinaryClassifier(num_features, 
         0, feature_size, hidden_size, non_lin, use_cuda) 
     self.word_model = classifier.Classifier(num_features, 0, feature_size,
-         hidden_size, vocab_size, gen_non_lin, use_cuda)
+         hidden_size, vocab_size, gen_non_lin, True, use_cuda)
 
     self.log_normalize = nn.LogSoftmax()
     self.binary_log_normalize = nn.LogSigmoid()
