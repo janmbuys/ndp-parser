@@ -46,6 +46,9 @@ if __name__=='__main__':
   parser.add_argument('--no_unk_classes', action='store_true', 
                       default=False)
 
+  parser.add_argument('--batched', action='store_true', 
+                      help='Batched supervised training', 
+                      default=False)
   parser.add_argument('--decode', action='store_true', 
                       help='Only decode, assuming existing model', 
                       default=False)
@@ -202,6 +205,13 @@ if __name__=='__main__':
       unsupervised_parser.decode(args, val_sentences, word_vocab, score=True)
     else: 
       unsupervised_parser.train(args, sentences, val_sentences, word_vocab)
+  elif args.batched:
+    if args.decode:          
+      supervised_parser_batched.decode(args, val_sentences, word_vocab, rel_vocab)
+    elif args.score:
+      supervised_parser_batched.decode(args, val_sentences, word_vocab, rel_vocab, score=True)
+    else:
+      supervised_parser_batched.train(args, sentences, val_sentences, word_vocab, rel_vocab)
   else:
     if args.decode:          
       supervised_parser.decode(args, val_sentences, word_vocab, pos_vocab, rel_vocab)

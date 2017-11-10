@@ -5,11 +5,11 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 
-def to_var(ts, use_cuda):
-  if use_cuda:
-    return Variable(ts).cuda()
+def to_var(ts, use_cuda, evaluation=False):
+  if use_cuda:  
+    return Variable(ts, volatile=evaluation).cuda()
   else:
-    return Variable(ts)
+    return Variable(ts, volatile=evaluation)
 
 #TODO from here change where called
 def to_numpy(dist):
@@ -123,23 +123,38 @@ def filter_logits(logits, targets, float_var=False, use_cuda=False):
 
 def get_sentence_data_batch(source_list, use_cuda, evaluation=False):
   data_ts = torch.cat([source.word_tensor for source in source_list], 1)
-  if use_cuda:
-    data = Variable(data_ts, volatile=evaluation).cuda()
-  else:
-    data = Variable(data_ts, volatile=evaluation)
-  return data
+  return to_var(data_ts, use_cuda, evaluation)
+
+
+def get_sentence_oracle_data_batch(sentences, use_cuda, evaluation=False):
+  data_ts = torch.cat([sent.word_tensor for sent in sentences], 1)
+  data = to_var(data_ts, use_cuda, evaluation)
+  
+  # predictions: dim [length, batch_size]
+  # features: dim [length, batch_size, 2]
+  num_predictions = len(sentences[0].predictions)
+  num_features = len(sentences[0].features) 
+  preds = []
+  feats = []
+  for i in range(num_predictions):
+    pred_ts = torch.cat([sent.predictions[i] for sent in sentences], 1)
+    pred = to_var(pred_ts, use_cuda, evaluation)
+    preds.append(pred)
+  for i in range(num_features): #TODO make more flexible
+    feat0_ts = torch.cat([sent.features[i][0] for sent in sentences], 1)
+    feat1_ts = torch.cat([sent.features[i][1] for sent in sentences], 1)
+    feat_ts = torch.stack(feat0_ts, feat1_ts, 2)
+    feat = to_var(feat_ts, use_cuda, evaluation)
+    feats.append(feat)
+
+  return data, preds, feats
 
 
 def get_sentence_batch(source_list, use_cuda, evaluation=False):
   data_ts = torch.cat([source.word_tensor[:-1] for source in source_list], 1)
   target_ts = torch.cat([source.word_tensor[1:] for source in source_list], 1)
-  if use_cuda:
-    data = Variable(data_ts, volatile=evaluation).cuda()
-    target = Variable(target_ts.view(-1)).cuda()
-  else:
-    data = Variable(data_ts, volatile=evaluation)
-    target = Variable(target_ts.view(-1))
+  data = to_var(data_ts, use_cuda, evaluation)
+  target = to_var(target_ts.view(-1), use_cuda)
   return data, target
-
 
 

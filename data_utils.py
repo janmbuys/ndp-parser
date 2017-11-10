@@ -77,6 +77,9 @@ class ParseSentence:
   def __init__(self, conll, tokens, relations=None):
     self.conll = conll
     self.word_tensor = torch.LongTensor(tokens).view(-1, 1)
+    # Placeholders for oracle
+    self.predictionss = None
+    self.features = None
 
   def __len__(self):
     return len(self.conll)
