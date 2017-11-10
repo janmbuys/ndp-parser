@@ -113,8 +113,7 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
     stack_model = arc_eager_dp.ArcHybridSup(vocab_size, num_relations,
         args.embedding_size, args.hidden_size, args.num_layers, args.dropout,
         args.init_weight_range, args.bidirectional, non_lin, gen_non_lin, 
-        args.predict_relations, 
-        args.stack_next, args.embed_only, args.embed_only_gen, args.cuda)
+        args.generative, args.stack_next, args.cuda)
   elif args.arc_eager:
       assert False, "Not yet implemented."
       #TODO 

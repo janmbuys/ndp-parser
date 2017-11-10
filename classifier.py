@@ -12,7 +12,7 @@ class Classifier(nn.Module):
   """Module with classifier for parsing."""
 
   def __init__(self, num_features, num_indicators, feature_size, hidden_size, 
-      output_size, non_lin, multiplicative_combination, use_cuda):
+      output_size, non_lin, use_cuda):
     super(Classifier, self).__init__()
     self.use_cuda = use_cuda
     self.non_lin = non_lin
@@ -20,7 +20,7 @@ class Classifier(nn.Module):
     self.feature_size = feature_size
     assert num_indicators >= 0 and num_indicators <= 2
     self.num_indicators = num_indicators
-    self.multiplicative_combination = multiplicative_combination
+    self.multiplicative_combination = False #TODO
     if self.multiplicative_combination:
       assert num_features == 2 and num_indicators == 0
       self.encode_size = feature_size

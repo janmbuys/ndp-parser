@@ -17,48 +17,36 @@ import data_utils
 class ArcHybridSup(nn.Module):
   """Stack-based generative model with dynamic programming inference.""" 
 
-  def __init__(self, vocab_size, num_relations, 
-               embedding_size, hidden_size, num_layers,
-               dropout, init_weight_range, bidirectional, non_lin, gen_non_lin,
-               predict_relations, generative,
-               stack_next, embed_only, embed_only_gen, use_cuda):
+  def __init__(self, vocab_size, num_relations, embedding_size, hidden_size, 
+               num_layers, dropout, init_weight_range, bidirectional, non_lin,
+               gen_non_lin, generative, stack_next, use_cuda):
     super(ArcHybridSup, self).__init__()
     self.use_cuda = use_cuda
     self.stack_next = stack_next
-    self.embed_only_gen = embed_only_gen
     num_features = 2
-    self.predict_relations = predict_relations
     self.generative = generative
     self.num_relations = num_relations
-    #TODO bidirectional
+    self.bidirectional = bidirecitonal
 
-    if embed_only: #don't really want this
-      self.encoder_model = embed_encoder.EmbedEncoder(vocab_size, embedding_size, 
-          hidden_size, dropout, init_weight_range, use_cuda=use_cuda)
-    else:
-      self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, embedding_size, 
-          hidden_size, num_layers, dropout, init_weight_range, bidirectional=False, use_cuda=use_cuda)
+    feature_size = (hidden_size*2 if bidirectional else hidden_size)
 
-    feature_size = hidden_size
+    self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, embedding_size, 
+        hidden_size, num_layers, dropout, init_weight_range, 
+        bidirectional=bidirectional, use_cuda=use_cuda)
+
     self.transition_model = binary_classifier.BinaryClassifier(num_features, 
         0, feature_size, hidden_size, non_lin, use_cuda) 
-   
-    # if supervised
     self.direction_model = binary_classifier.BinaryClassifier(num_features, 
-        0, self.feature_size, hidden_size, non_lin, use_cuda) 
+        0, feature_size, hidden_size, non_lin, use_cuda) 
 
-    if generative: 
+    if self.generative: 
       self.word_model = classifier.Classifier(num_features, 0, feature_size,
           hidden_size, vocab_size, gen_non_lin, use_cuda)
     else:
       self.word_model = None
 
-    if predict_relations:
-      self.relation_model = classifier.Classifier(num_features,
-          0, self.feature_size, 
-          hidden_size, num_relations, non_lin, use_cuda)
-    else:
-      self.relation_model = None
+    self.relation_model = classifier.Classifier(num_features, 0, 
+        feature_size, hidden_size, num_relations, non_lin, use_cuda)
 
     self.log_normalize = nn.LogSoftmax()
     self.binary_log_normalize = nn.LogSigmoid()
@@ -66,8 +54,8 @@ class ArcHybridSup(nn.Module):
     self.criterion = nn.CrossEntropyLoss(size_average=False)
     self.binary_criterion = nn.BCEWithLogitsLoss(size_average=False)
 
-  # This is direction (la/ra)-invarient
   def _inside_algorithm(self, encoder_features, sentence, batch_size):
+    assert self.generative
     # enc feature dim length x batch x state_size
     # sentence dim length x batch
     sent_length = sentence.size()[0] - 1
@@ -84,14 +72,8 @@ class ArcHybridSup(nn.Module):
     re_rev_log_probs_list = self.binary_log_normalize(self.transition_model(rev_features)).view(num_pairs, batch_size)
 
     # dim [num_pairs*batch_size, output_size] -> break dim
-    if self.embed_only_gen:
-      gen_features = nn_utils.batch_feature_selection(encoder_features[0], 
-          seq_length, self.use_cuda, stack_next=self.stack_next)
-      word_distr_list = self.log_normalize(self.word_model(gen_features)).view(
-          num_pairs, batch_size, -1) 
-    else:
-      word_distr_list = self.log_normalize(self.word_model(features)).view(
-          num_pairs, batch_size, -1) 
+    word_distr_list = self.log_normalize(self.word_model(features)).view(
+        num_pairs, batch_size, -1) 
 
     # enumerate indexes
     inds_table = np.zeros((seq_length, seq_length), dtype=np.int)
@@ -210,7 +192,7 @@ class ArcHybridSup(nn.Module):
           if given_actions is None:
             action = data_utils._SH
         
-        if self.relation_model is not None and action != data_utils._SH:
+        if action != data_utils._SH:
           relation_logit = self.relation_model(features)      
           relation_logit_np = relation_logit.cpu().data.numpy()
           label = int(relation_logit_np.argmax(axis=1)[0])
@@ -230,8 +212,7 @@ class ArcHybridSup(nn.Module):
           dependents[child] = buffer_index
         else:
           dependents[child] = stack[-1]
-        if self.relation_model is not None:
-          labels[child] = label
+        labels[child] = label
 
     actions = given_actions if given_actions is not None else predicted_actions
 
@@ -291,7 +272,7 @@ class ArcHybridSup(nn.Module):
     ra_dir_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.direction_model(features)))
     la_dir_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.direction_model(features)))
 
-    if self.word_model is not None:
+    if self.generative:
       word_distr_list = self.log_normalize(self.word_model(features))
 
     counter = 0 
@@ -303,7 +284,7 @@ class ArcHybridSup(nn.Module):
         ra_log_probs[i, j] = (re_log_probs_list[counter] 
                               + ra_dir_log_probs_list[counter])
 
-        if self.word_model is not None and j < sent_length:
+        if self.generative and j < sent_length:
           word_log_probs[i, j] = nn_utils.to_numpy(
               word_distr_list[counter, word_ids[j if self.stack_next else j+1]])
         counter += 1
@@ -316,7 +297,7 @@ class ArcHybridSup(nn.Module):
     directions.fill(data_utils._DRA) # default direction
 
     # first word prob 
-    if self.word_model is not none and not self.stack_next:
+    if self.generative and not self.stack_next:
       init_features = nn_utils.select_features(encoder_features[1], [0, 0], self.use_cuda)
       init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
       table[0, 0, 1] = nn_utils.to_numpy(init_word_distr[word_ids[1]])
@@ -326,7 +307,7 @@ class ArcHybridSup(nn.Module):
     for j in range(2, sent_length+1):
       for i in range(j-1):
         score = shift_log_probs[i, j-1]
-        if self.word_model is not None:
+        if self.generative:
           score += word_log_probs[i, j-1]
         table[i, j-1, j] = score
       for i in range(j-2, -1, -1):
@@ -373,6 +354,7 @@ class ArcHybridSup(nn.Module):
         encoder_features, sentence, batch_size))
     return loss
 
+
   def lookup_features(self, encoder_features, feature_pos):
     # assume pair features for now
       # TODO test this especially broadcasting behaviour
@@ -402,16 +384,20 @@ class ArcHybridSup(nn.Module):
     # return logits vector length [seq_len*batch_size, num_classes]
     transition_logit = self.transition_model(clas_features[0])
     direction_logit = self.direction_model(clas_features[2])
-    gen_word_logits = self.word_model(clas_features[1])
     relation_logits = self.relation_model(clas_features[2])
+    if self.generative:
+      gen_word_logits = self.word_model(clas_features[1])
 
     tr_loss = self.binary_criterion(transition_logit.view(-1),
         prediction_vars[0].view(-1))
     dir_loss = self.binary_criterion(direction_logit.view(-1),
         prediction_vars[1].view(-1))
-    word_loss = self.criterion(gen_word_logits, prediction_vars[2].view(-1))
     rel_loss = self.criterion(relation_logits, prediction_vars[3].view(-1))
-    loss = (tr_loss + dir_loss + word_loss + rel_loss)/(sent_length*batch_size) 
+    loss = tr_loss + dir_loss + rel_loss
+    if self.generative:
+      word_loss = self.criterion(gen_word_logits, prediction_vars[2].view(-1))
+      loss += word_loss
+    avg_loss = loss/(sent_length*batch_size) 
     return loss
 
 
