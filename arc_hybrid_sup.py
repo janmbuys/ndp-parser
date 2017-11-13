@@ -26,27 +26,27 @@ class ArcHybridSup(nn.Module):
     num_features = 2
     self.generative = generative
     self.num_relations = num_relations
-    self.bidirectional = bidirecitonal
+    self.bidirectional = bidirectional
 
-    feature_size = (hidden_size*2 if bidirectional else hidden_size)
+    self.feature_size = (hidden_size*2 if bidirectional else hidden_size)
 
     self.encoder_model = rnn_encoder.RNNEncoder(vocab_size, embedding_size, 
         hidden_size, num_layers, dropout, init_weight_range, 
         bidirectional=bidirectional, use_cuda=use_cuda)
 
     self.transition_model = binary_classifier.BinaryClassifier(num_features, 
-        0, feature_size, hidden_size, non_lin, use_cuda) 
+        0, self.feature_size, hidden_size, non_lin, use_cuda) 
     self.direction_model = binary_classifier.BinaryClassifier(num_features, 
-        0, feature_size, hidden_size, non_lin, use_cuda) 
+        0, self.feature_size, hidden_size, non_lin, use_cuda) 
 
     if self.generative: 
-      self.word_model = classifier.Classifier(num_features, 0, feature_size,
+      self.word_model = classifier.Classifier(num_features, 0, self.feature_size,
           hidden_size, vocab_size, gen_non_lin, use_cuda)
     else:
       self.word_model = None
 
     self.relation_model = classifier.Classifier(num_features, 0, 
-        feature_size, hidden_size, num_relations, non_lin, use_cuda)
+        self.feature_size, hidden_size, num_relations, non_lin, use_cuda)
 
     self.log_normalize = nn.LogSoftmax()
     self.binary_log_normalize = nn.LogSigmoid()
@@ -54,7 +54,7 @@ class ArcHybridSup(nn.Module):
     self.criterion = nn.CrossEntropyLoss(size_average=False)
     self.binary_criterion = nn.BCEWithLogitsLoss(size_average=False)
 
-  def _inside_algorithm(self, encoder_features, sentence, batch_size):
+  def inside_algorithm(self, encoder_features, sentence, batch_size):
     assert self.generative
     # enc feature dim length x batch x state_size
     # sentence dim length x batch
@@ -127,8 +127,10 @@ class ArcHybridSup(nn.Module):
         # Super vectorization 
         re_probs = re_rev_log_probs_list[start_ind:end_ind]
         temp_right = table[i, i+1:j, j] + re_probs #.view(1, -1, batch_size)
-        all_block_scores = (table[0:max(i, 1), i, i+1:j] 
+        all_block_scores = (table[0:max(i, 1), i, i+1:j]
                             + temp_right.expand(max(i, 1), gap - 1, batch_size))
+        #print(all_block_scores.size())
+        #print(nn_utils.log_sum_exp(all_block_scores, 1).size())
         table[0:max(i, 1), i, j] = nn_utils.log_sum_exp(all_block_scores, 1)
      
     final_score = re_rev_log_probs_list[get_rev_feature_index(0, sent_length)]
@@ -139,6 +141,7 @@ class ArcHybridSup(nn.Module):
     stack = []
     buffer_index = 0
     sent_length = len(word_ids) - 1
+    #print("sentence length %d" % sent_length) 
 
     num_actions = 0
     predicted_actions = []
@@ -146,6 +149,7 @@ class ArcHybridSup(nn.Module):
     labels = [-1 for _ in word_ids]
 
     while buffer_index < sent_length or len(stack) > 1:
+      #print(buffer_index)
       if given_actions is not None:
         assert len(given_actions) > num_actions
         action = given_actions[num_actions]
@@ -155,9 +159,12 @@ class ArcHybridSup(nn.Module):
       label = -1
       s0 = stack[-1] if len(stack) > 0 else 0
 
-      position = nn_utils.extract_feature_positions(buffer_index, s0,
-          stack_next=self.stack_next)
+      position = nn_utils.extract_feature_positions(
+          buffer_index, s0, stack_next=self.stack_next)
       features = nn_utils.select_features(encoder_features[1], position, self.use_cuda)
+
+      def _test_logit(logit):
+        return float(nn_utils.to_numpy(logit)) > 0
 
       if len(stack) > 1: # allowed to ra or la
         if buffer_index == sent_length:
@@ -165,14 +172,15 @@ class ArcHybridSup(nn.Module):
             assert action == data_utils._RA
           else:
             action = data_utils._RA
-        if given_actions is not None:
+            #print("end ra")
+        elif given_actions is not None:
           if action == data_utils._SH:
             sh_action = data_utils._SSH
           else:
             sh_action = data_utils._SRE
         else:
           transition_logit = self.transition_model(features)
-          sh_action = 1 if transition_logit.cpu().data.numpy() > 0 else 0
+          sh_action = 1 if _test_logit(transition_logit) else 0
 
         if sh_action == data_utils._SRE:
           if given_actions is not None:
@@ -182,24 +190,22 @@ class ArcHybridSup(nn.Module):
               direc = data_utils._DRA
           else:
             direction_logit = self.direction_model(features)  
-            direc = 1 if direction_logit.cpu().data.numpy() > 0 else 0
+            direc = 1 if _test_logit(direction_logit) else 0
 
             if direc == data_utils._DLA:
               action = data_utils._LA
             else:
               action = data_utils._RA
-        else:
-          if given_actions is None:
-            action = data_utils._SH
         
         if action != data_utils._SH:
           relation_logit = self.relation_model(features)      
-          relation_logit_np = relation_logit.cpu().data.numpy()
+          relation_logit_np = nn_utils.to_numpy(relation_logit)
           label = int(relation_logit_np.argmax(axis=1)[0])
         
       num_actions += 1
       if given_actions is None:
         predicted_actions.append(action)
+      #print("action %d" % action)
 
       # excecute action
       if action == data_utils._SH:
@@ -216,42 +222,8 @@ class ArcHybridSup(nn.Module):
 
     actions = given_actions if given_actions is not None else predicted_actions
 
-    return actions, dependents, relation_labels
+    return actions, dependents, labels
   
-
-  def _decode_action_sequence(self, encoder_features, word_ids, actions):
-    """Execute a given action sequence""" #TODO also find best relations
-    # only store indexes on the stack
-    stack = []
-    buffer_index = 0
-    sent_length = len(word_ids) - 1
-
-    buffer_shift_dependents = [-1 for _ in word_ids] # stack top when generated
-    stack_shift_dependents = [-1 for _ in word_ids] # interpret SH as (eager) RA
-    reduce_dependents = [-1 for _ in word_ids]
-
-    for action in actions:
-      s0 = stack[-1] if len(stack) > 0 else 0
-
-      if len(stack) > 1: # allowed to re
-        if buffer_index == sent_length:
-          assert action == data_utils._SRE
-        
-      # excecute action
-      if action == data_utils._SSH:
-        if len(stack) > 0:
-          stack_shift_dependents[buffer_index] = stack[-1]
-          if buffer_index + 1 < len(word_ids):
-            buffer_shift_dependents[buffer_index+1] = stack[-1]
-        stack.append(buffer_index) 
-        buffer_index += 1
-      else:  
-        assert len(stack) > 0
-        child = stack.pop()
-        reduce_dependents[child] = buffer_index
-        
-    return actions, stack_shift_dependents
-
 
   def viterbi_decode(self, encoder_features, word_ids):
     #TODO extend to la/ra (direction model)
@@ -268,7 +240,9 @@ class ArcHybridSup(nn.Module):
 
     features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
         self.use_cuda, stack_next=self.stack_next)
+    re_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.transition_model(features)))
     sh_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.transition_model(features)))
+
     ra_dir_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.direction_model(features)))
     la_dir_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.direction_model(features)))
 
@@ -350,18 +324,23 @@ class ArcHybridSup(nn.Module):
     encoder_state = self.encoder_model.init_hidden(batch_size)
     encoder_features = self.encoder_model(sentence, encoder_state)
 
-    loss = -torch.sum(self._inside_algorithm(
+    loss = -torch.sum(self.inside_algorithm(
         encoder_features, sentence, batch_size))
     return loss
 
 
   def lookup_features(self, encoder_features, feature_pos):
+    feat_seq_size = int(feature_pos.size()[0])
+    batch_size = int(feature_pos.size()[1])
     # assume pair features for now
-      # TODO test this especially broadcasting behaviour
-    left_features = torch.gather(encoder_features, 0,
-                            feature_pos[:,:,0].unsqueeze(2))
-    right_features = torch.gather(encoder_features, 0,
-                            feature_pos[:,:,1].unsqueeze(2))
+    left_pos = feature_pos[:,:,0].unsqueeze(2).expand(feat_seq_size, 
+        batch_size, self.feature_size) #TODO test without expand
+    #print(encoder_features[1].size())
+    #print(left_pos.size())
+    left_features = torch.gather(encoder_features[1], 0, left_pos)
+    right_pos = feature_pos[:,:,1].unsqueeze(2).expand(feat_seq_size, 
+        batch_size, self.feature_size)
+    right_features = torch.gather(encoder_features[1], 0, right_pos)
     features = torch.stack((left_features, right_features), 2)
     return features # size [num_features, batch_size, 2, embed_size]
 
@@ -377,16 +356,16 @@ class ArcHybridSup(nn.Module):
     encoder_state = self.encoder_model.init_hidden(batch_size)
     encoder_features = self.encoder_model(sentence, encoder_state)
     
-    clas_features = [self.lookup_features(encoder_features, feature_ind)
+    slot_features = [self.lookup_features(encoder_features, feature_ind)
                      for feature_ind in feature_inds]
 
     # assume all models are used for now
     # return logits vector length [seq_len*batch_size, num_classes]
-    transition_logit = self.transition_model(clas_features[0])
-    direction_logit = self.direction_model(clas_features[2])
-    relation_logits = self.relation_model(clas_features[2])
+    transition_logit = self.transition_model(slot_features[0])
+    direction_logit = self.direction_model(slot_features[2])
+    relation_logits = self.relation_model(slot_features[2])
     if self.generative:
-      gen_word_logits = self.word_model(clas_features[1])
+      gen_word_logits = self.word_model(slot_features[1])
 
     tr_loss = self.binary_criterion(transition_logit.view(-1),
         prediction_vars[0].view(-1))
@@ -397,16 +376,37 @@ class ArcHybridSup(nn.Module):
     if self.generative:
       word_loss = self.criterion(gen_word_logits, prediction_vars[2].view(-1))
       loss += word_loss
-    avg_loss = loss/(sent_length*batch_size) 
+
+    #loss = loss/(sent_length*batch_size) #TODO test - LM does not average
     return loss
 
 
-  def forward(self, sentence):
+  def forward(self, sentence, viterbi=True):
     encoder_state = self.encoder_model.init_hidden(1) # batch_size==1
     encoder_features = self.encoder_model(sentence, encoder_state)
     word_ids = [int(x) for x in sentence.view(-1).data]
 
-    return self.viterbi_decode(encoder_features, word_ids)
+    if viterbi:
+      return self.viterbi_decode(encoder_features, word_ids)
+    else:
+      return self.greedy_decode(encoder_features, word_ids)
+
+
+  def decompose_transitions(self, actions):
+    stackops = []
+    directions = []
+    
+    for action in actions:
+      if action == data_utils._SH:
+        stackops.append(data_utils._SSH)
+      else:
+        stackops.append(data_utils._SRE)
+        if action == data_utils._LA:
+          directions.append(data_utils._DLA)
+        else:  
+          directions.append(data_utils._DRA)
+    
+    return stackops, directions
 
 
   def oracle(self, conll, stack_next=False):
@@ -477,27 +477,13 @@ class ArcHybridSup(nn.Module):
         else:
           stack.roots[-1].children.append(child)
 
-    return (actions, words, labels), (tr_features, gen_features, label_features)
+    stackops, directions = self.decompose_transitions(actions)
+    predictions = (list(map(lambda x: torch.FloatTensor(x).view(-1, 1), 
+                            [stackops, directions]))
+                   + list(map(lambda x: torch.LongTensor(x).view(-1, 1), 
+                            [words, labels])))
 
-
-  def map_transitions(self, actions):
-    return [act for act in actions]
-
-
-  def decompose_transitions(self, actions):
-    stackops = []
-    directions = []
-    
-    for action in actions:
-      if action == data_utils._SH:
-        stackops.append(data_utils._SSH)
-        directions.append(None)
-      else:
-        stackops.append(data_utils._SRE)
-        if action == data_utils._LA:
-          directions.append(data_utils._DLA)
-        else:  
-          directions.append(data_utils._DRA)
-    
-    return stackops, directions
+    features = list(map(lambda x: torch.LongTensor(x).view(-1, 1, 2), 
+                        [tr_features, gen_features, label_features]))
+    return predictions, features 
 

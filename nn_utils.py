@@ -21,19 +21,11 @@ def log_sum_exp_1d(vec):
     max_score_broadcast = max_score.view(1, -1).expand(1, vec.size()[1])
     return max_score + torch.log(torch.sum(torch.exp(vec - max_score_broadcast)))
 
-def log_sum_exp_2d(vec):
-    # sum over second dimension
-    max_score, _ = torch.max(vec, 1) 
-    #max_score = vec[0, np.argmax(vec, 1)]
-    max_score_broadcast = max_score.view(-1, 1).expand(vec.size())
-    return max_score + torch.log(torch.sum(
-        torch.exp(vec - max_score_broadcast), 1))
-
 def log_sum_exp(vec, dim):
     # sum over dim
-    max_score, _ = torch.max(vec, dim) 
+    max_score, _ = torch.max(vec, dim, keepdim=True) 
     max_score_broadcast = max_score.expand(vec.size())
-    return max_score + torch.log(torch.sum(
+    return max_score.squeeze(dim) + torch.log(torch.sum(
         torch.exp(vec - max_score_broadcast), dim))
 
 def select_features(input_features, indexes, use_cuda=False):
@@ -132,22 +124,19 @@ def get_sentence_oracle_data_batch(sentences, use_cuda, evaluation=False):
   
   # predictions: dim [length, batch_size]
   # features: dim [length, batch_size, 2]
-  num_predictions = len(sentences[0].predictions)
-  num_features = len(sentences[0].features) 
-  preds = []
+  num_prediction_slots = len(sentences[0].predictions)
+  num_feature_slots = len(sentences[0].features) 
   feats = []
-  for i in range(num_predictions):
+  for i in range(num_feature_slots): 
+    feat_ts = torch.cat([sent.features[i] for sent in sentences], 1)
+    feat = to_var(feat_ts, use_cuda, evaluation)
+    feats.append(feat)
+  preds = []
+  for i in range(num_prediction_slots):
     pred_ts = torch.cat([sent.predictions[i] for sent in sentences], 1)
     pred = to_var(pred_ts, use_cuda, evaluation)
     preds.append(pred)
-  for i in range(num_features): #TODO make more flexible
-    feat0_ts = torch.cat([sent.features[i][0] for sent in sentences], 1)
-    feat1_ts = torch.cat([sent.features[i][1] for sent in sentences], 1)
-    feat_ts = torch.stack(feat0_ts, feat1_ts, 2)
-    feat = to_var(feat_ts, use_cuda, evaluation)
-    feats.append(feat)
-
-  return data, preds, feats
+  return data, feats, preds
 
 
 def get_sentence_batch(source_list, use_cuda, evaluation=False):

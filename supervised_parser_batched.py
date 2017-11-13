@@ -10,11 +10,10 @@ import torch.optim as optim
 
 import data_utils
 import nn_utils
-import arc_hybrid
-import arc_eager 
+import arc_hybrid_sup
 
 def training_decode(val_sentences, stack_model, word_vocab, rel_vocab, 
-        conll_output_fn, transition_output_fn, max_sents=-1, use_cuda=False):
+        conll_output_fn, transition_output_fn, viterbi_decode, max_sents=-1, use_cuda=False):
   stack_model.eval()
   decode_start_time = time.time()
   with open(conll_output_fn, 'w') as conll_fh:
@@ -24,7 +23,8 @@ def training_decode(val_sentences, stack_model, word_vocab, rel_vocab,
           break
         sentence_data = nn_utils.get_sentence_data_batch([val_sent], use_cuda,
             evaluation=True)
-        actions, dependents, labels = stack_model.forward(sentence_data)
+        actions, dependents, labels = stack_model.forward(sentence_data,
+                viterbi_decode)
         action_str = ' '.join([data_utils.transition_to_str(act) 
                                for act in actions])
         tr_fh.write(action_str + '\n')
@@ -40,8 +40,7 @@ def training_decode(val_sentences, stack_model, word_vocab, rel_vocab,
   print('decode time {:2.2f}s'.format(time.time() - decode_start_time))
 
 
-def training_score(args, model, val_sentences):
-  val_batch_size = 1
+def training_score(args, stack_model, val_sentences):
   total_loss = 0
   total_length = 0
   total_length_more = 0
@@ -52,7 +51,7 @@ def training_score(args, model, val_sentences):
   for val_sent in val_sentences:
     sentence_data = nn_utils.get_sentence_data_batch([val_sent], args.cuda,
         evaluation=True)
-    loss = model.neg_log_likelihood(sentence_data) # inside_score
+    loss = stack_model.neg_log_likelihood(sentence_data) # inside_score
     total_loss += loss.data
     total_length += len(val_sent) - 1 
     total_length_more += len(val_sent) 
@@ -63,7 +62,6 @@ def training_score(args, model, val_sentences):
 def decode(args, val_sentences, word_vocab, rel_vocab, score=False):
   vocab_size = len(word_vocab)
   num_relations = len(rel_vocab)
-  batch_size = 1
   model_path = args.working_dir + '/' + args.save_model
   non_lin = args.non_lin #TODO better interface
   gen_non_lin = args.gen_non_lin
@@ -96,7 +94,7 @@ def decode(args, val_sentences, word_vocab, rel_vocab, score=False):
   else: 
     out_name = args.working_dir + '/' + args.dev_name 
     training_decode(val_sentences, stack_model, word_vocab, rel_vocab, out_name + '.output.conll',
-        out_name + '.output.tr', use_cuda=args.cuda)
+        out_name + '.output.tr', args.viterbi_decode, use_cuda=args.cuda)
 
 
 def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
@@ -110,7 +108,7 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
   # Build the model
   assert args.arc_hybrid or args.arc_eager
   if args.arc_hybrid:
-    stack_model = arc_eager_dp.ArcHybridSup(vocab_size, num_relations,
+    stack_model = arc_hybrid_sup.ArcHybridSup(vocab_size, num_relations,
         args.embedding_size, args.hidden_size, args.num_layers, args.dropout,
         args.init_weight_range, args.bidirectional, non_lin, gen_non_lin, 
         args.generative, args.stack_next, args.cuda)
@@ -133,13 +131,8 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
   # run the oracle
   for sentence in sentences:
     # (transition_action, [direction], word_gen, relation_label) tuples
-    predictions, features = stack_model.oracle(sentence.conll, args.stack_next)
-    stackops, directions = stack_model.decompose_actions(predictions[0])
-    predictions = (stackops, directions, predictions[1], predictions[2])
-    sentence.predictions = predictions
-    sentence.features = features
+    sentence.predictions, sentence.features = stack_model.oracle(sentence.conll, args.stack_next)
 
-  batch_size = 1
   prev_val_loss = None
   patience_count = 0
   for epoch in range(1, args.epochs+1):
@@ -153,6 +146,7 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
     global_loss = 0 
     total_num_tokens = 0 
     global_num_tokens = 0 
+    batch_count = 0
 
     start_time = time.time()
     i = 0  
@@ -161,10 +155,10 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
       length = len(sentences[i])
       j = i + 1
       while (j < len(sentences) and len(sentences[j]) == length
-             and (j - i) < batch_size):
+             and (j - i) < args.batch_size):
         j += 1
       local_batch_size = j - i
-      sentence_data, sentence_preds, sentences_feats = nn_utils.get_sentence_oracle_data_batch(
+      sentence_data, sentence_feats, sentence_preds = nn_utils.get_sentence_oracle_data_batch(
           [sentences[k] for k in range(i, j)], args.cuda)
 
       i = j
@@ -192,7 +186,7 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
           out_name = (args.working_dir + '/' + args.dev_name + '.' 
                       + str(epoch) + '.' + str(batch_count))
           training_decode(dev_sentences, stack_model, word_vocab, rel_vocab,
-              out_name + '.conll', out_name + '.tr', -1, args.cuda)
+              out_name + '.conll', out_name + '.tr', args.viterbi_decode, -1, args.cuda)
 
         cur_loss = total_loss[0] / total_num_tokens
         elapsed = time.time() - start_time
@@ -214,7 +208,7 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
     # Decoding
     out_name = args.working_dir + '/' + args.dev_name + '.' + str(epoch)
     training_decode(dev_sentences, stack_model, word_vocab, rel_vocab,
-        out_name + '.conll', out_name + '.tr', -1, args.cuda)
+        out_name + '.conll', out_name + '.tr', args.viterbi_decode, -1, args.cuda)
 
     if args.generative:
       # score the model 
@@ -222,8 +216,8 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
       total_loss, total_length, total_length_more = training_score(args,
           stack_model, dev_sentences)
 
-      val_loss = - total_loss / total_length
-      val_loss_more = - total_loss / total_length_more
+      val_loss = total_loss[0] / total_length
+      val_loss_more = total_loss[0] / total_length_more
       print('-' * 89)
       print('| scoring time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
            (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
@@ -257,9 +251,6 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
                   + str(epoch) + '.pt')
       with open(model_fn, 'wb') as f:
         torch.save(stack_model, f)
-
-      tr_system.store_model(args.working_dir + '/' + args.save_model + '_' +
-          str(epoch))
 
     if args.patience > 0 and patience_count >= args.patience:
       break

@@ -15,6 +15,7 @@ import torch
 import data_utils
 
 import supervised_parser
+import supervised_parser_batched
 import unsupervised_parser
 
 if __name__=='__main__':
@@ -194,8 +195,8 @@ if __name__=='__main__':
   #    [sent.conll for sent in dev_sentences])
 
   if args.small_data:
-    sentences = sentences[:30]  #temp: get no training baseline 
-    dev_sentences = dev_sentences[:30]
+    sentences = sentences[:100]  #temp: get no training baseline 
+    dev_sentences = dev_sentences[:100]
 
   val_sentences = test_sentences if args.test else dev_sentences
   if args.unsup:

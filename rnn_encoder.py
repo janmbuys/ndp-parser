@@ -41,5 +41,5 @@ class RNNEncoder(nn.Module):
     output, hidden = self.rnn(emb, hidden)
     #print(str(self.hidden_size) + ' : ' + str(output.size()))
     output = self.drop(output)
-    return (emb, output) #TODO
+    return (emb, output) 
 
