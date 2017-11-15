@@ -49,11 +49,11 @@ class ArcEagerDP(nn.Module):
     else:
       self.transition_model = classifier.Classifier(num_features, 
           1 if with_valency else 0, feature_size, hidden_size, 
-          self.num_transitions, non_lin, False, use_cuda) 
+          self.num_transitions, non_lin, use_cuda) 
 
     self.word_model = classifier.Classifier(num_features, 
         2 if with_valency else 0, feature_size, hidden_size, vocab_size, 
-        gen_non_lin, False, use_cuda)
+        gen_non_lin, use_cuda)
 
     self.log_normalize = nn.LogSoftmax()
     self.binary_log_normalize = nn.LogSigmoid()

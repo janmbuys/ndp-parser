@@ -268,7 +268,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
 
     # batch feature computation
     features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
-        self.use_cuda)
+        self.use_cuda, stack_next=self.stack_next)
     num_items = features.size()[0]
 
     # dim [num_items, 2 (headedness), batch_size, num_features, feature_size]
@@ -307,7 +307,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
       #    num_items, 2, self.vocab_size)
       if self.embed_only_gen:
         gen_features = nn_utils.batch_feature_selection(encoder_features[0], 
-            seq_length, self.use_cuda)
+            seq_length, self.use_cuda, stack_next=self.stack_next)
         word_dist = self.log_normalize(self.word_model(gen_features)).view(
             num_items, self.vocab_size)
       else:
@@ -433,7 +433,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
 
     # batch feature computation
     features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
-        self.use_cuda)
+        self.use_cuda, stack_next=self.stack_next)
     num_items = features.size()[0]
 
     # dim [num_items, 2 (headedness), batch_size, num_features, feature_size]
@@ -475,7 +475,7 @@ class ArcEagerTransitionSystem(tr.TransitionSystem):
 
     if self.embed_only_gen:
       gen_features = nn_utils.batch_feature_selection(encoder_features[0], 
-          seq_length, self.use_cuda)
+          seq_length, self.use_cuda, stack_next=self.stack_next)
       word_dist = self.log_normalize(self.word_model(gen_features)).view(
           num_items, self.vocab_size)
     else:
