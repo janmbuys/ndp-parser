@@ -147,6 +147,7 @@ class ArcHybridSup(nn.Module):
     predicted_actions = []
     dependents = [-1 for _ in word_ids]
     labels = [-1 for _ in word_ids]
+    greedy_word_loss = 0
 
     while buffer_index < sent_length or len(stack) > 1:
       #print(buffer_index)
@@ -172,7 +173,7 @@ class ArcHybridSup(nn.Module):
             assert action == data_utils._RA
           else:
             action = data_utils._RA
-            #print("end ra")
+          sh_action = data_utils._SRE
         elif given_actions is not None:
           if action == data_utils._SH:
             sh_action = data_utils._SSH
@@ -202,6 +203,11 @@ class ArcHybridSup(nn.Module):
           relation_logit_np = nn_utils.to_numpy(relation_logit)
           label = int(relation_logit_np.argmax(axis=1)[0])
         
+      if self.generative and action == data_utils._SH:
+        word_distr = self.log_normalize(self.word_model(features)).view(-1)
+        word_id = word_ids[buffer_index if self.stack_next else buffer_index+1]
+        greedy_word_loss += nn_utils.to_numpy(word_distr[word_id])
+
       num_actions += 1
       if given_actions is None:
         predicted_actions.append(action)
@@ -222,7 +228,7 @@ class ArcHybridSup(nn.Module):
 
     actions = given_actions if given_actions is not None else predicted_actions
 
-    return actions, dependents, labels
+    return actions, dependents, labels, greedy_word_loss
   
 
   def viterbi_decode(self, encoder_features, word_ids):

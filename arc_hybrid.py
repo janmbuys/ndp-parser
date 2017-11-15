@@ -63,7 +63,7 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
 
     # batch feature computation
     features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
-        self.use_cuda)
+        self.use_cuda, stack_next=self.stack_next)
     if self.decompose_actions:
       re_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.transition_model(features)))
       sh_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.transition_model(features)))
@@ -75,7 +75,7 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
     if self.word_model is not None:
       if self.embed_only_gen:
         gen_features = nn_utils.batch_feature_selection(encoder_features[0], 
-            seq_length, self.use_cuda)
+            seq_length, self.use_cuda, stack_next=self.stack_next)
         word_dist = self.log_normalize(self.word_model(gen_features))
       else:
         word_dist = self.log_normalize(self.word_model(features))
@@ -316,7 +316,7 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
 
     # batch feature computation
     features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
-        self.use_cuda)
+        self.use_cuda, stack_next=self.stack_next)
     if self.decompose_actions:
       re_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.transition_model(features)))
       sh_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.transition_model(features)))
@@ -325,7 +325,7 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
 
     if self.embed_only_gen:
       gen_features = nn_utils.batch_feature_selection(encoder_features[0], 
-          seq_length, self.use_cuda)
+          seq_length, self.use_cuda, stack_next=self.stack_next)
       word_dist = self.log_normalize(self.word_model(gen_features))
     else:
       word_dist = self.log_normalize(self.word_model(features))
@@ -402,7 +402,7 @@ class ArcHybridTransitionSystem(transition_system.TransitionSystem):
           action = data_utils._RA
           
       position = nn_utils.extract_feature_positions(buffer_index, s0, s1, s2,
-          self.more_context) 
+          self.more_context, stack_next=self.stack_next) 
       feature = nn_utils.select_features(encoder_features[1], position, self.use_cuda)
       features.append(feature)
       if self.embed_only_gen:

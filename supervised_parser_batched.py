@@ -14,17 +14,27 @@ import arc_hybrid_sup
 
 def training_decode(val_sentences, stack_model, word_vocab, rel_vocab, 
         conll_output_fn, transition_output_fn, viterbi_decode, max_sents=-1, use_cuda=False):
+
+  greedy_loss = 0
+  length = 0
+  length_more = 0
   stack_model.eval()
   decode_start_time = time.time()
+
   with open(conll_output_fn, 'w') as conll_fh:
     with open(transition_output_fn, 'w') as tr_fh:
+      print("decoding %d sentences." % len(val_sentences))
       for i, val_sent in enumerate(val_sentences):
         if max_sents > 0 and i > max_sents:
           break
         sentence_data = nn_utils.get_sentence_data_batch([val_sent], use_cuda,
             evaluation=True)
-        actions, dependents, labels = stack_model.forward(sentence_data,
+        actions, dependents, labels, greedy_word_loss = stack_model.forward(sentence_data,
                 viterbi_decode)
+        greedy_loss += greedy_word_loss
+        length += len(val_sent) - 1 
+        length_more += len(val_sent) 
+
         action_str = ' '.join([data_utils.transition_to_str(act) 
                                for act in actions])
         tr_fh.write(action_str + '\n')
@@ -37,7 +47,20 @@ def training_decode(val_sentences, stack_model, word_vocab, rel_vocab,
               entry.cpos, entry.pos, 
               '_', str(pred_parent), pred_relation, '_', '_']) + '\n')
         conll_fh.write('\n')
+  print('-' * 89)
   print('decode time {:2.2f}s'.format(time.time() - decode_start_time))
+
+  val_loss = - greedy_loss[0] / length
+  val_loss_more = - greedy_loss[0] / length_more
+
+  print(val_loss)
+  print(math.exp(val_loss))
+
+  print('| greedy valid loss {:5.2f} | valid ppl {:8.2f} '.format(
+       val_loss, math.exp(val_loss)))
+  print('       | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(
+       val_loss_more, math.exp(val_loss_more)))
+  print('-' * 89)
 
 
 def training_score(args, stack_model, val_sentences):
@@ -68,7 +91,7 @@ def decode(args, val_sentences, word_vocab, rel_vocab, score=False):
 
   assert model_path != ''
   print('Loading models')
-  model_fn = model_path + '_stack.pt'
+  model_fn = model_path + '.pt'
   with open(model_fn, 'rb') as f:
     stack_model = torch.load(f)
  
@@ -177,17 +200,11 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
         total_loss += loss.data
         global_loss += loss.data
 
-      batch_tokens = (sentence_data.size()[0] - 1)*local_batch_size
+      batch_tokens = (sentence_data.size()[0] - 2)*local_batch_size
       total_num_tokens += batch_tokens
       global_num_tokens += batch_tokens
 
       if batch_count % args.logging_interval == 0 and i > 0:
-        if args.decode_at_checkpoints:
-          out_name = (args.working_dir + '/' + args.dev_name + '.' 
-                      + str(epoch) + '.' + str(batch_count))
-          training_decode(dev_sentences, stack_model, word_vocab, rel_vocab,
-              out_name + '.conll', out_name + '.tr', args.viterbi_decode, -1, args.cuda)
-
         cur_loss = total_loss[0] / total_num_tokens
         elapsed = time.time() - start_time
         print('| epoch {:3d} | {:5d} batches | lr {:02.4f} | ms/batch {:5.2f} | '
@@ -208,7 +225,7 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
     # Decoding
     out_name = args.working_dir + '/' + args.dev_name + '.' + str(epoch)
     training_decode(dev_sentences, stack_model, word_vocab, rel_vocab,
-        out_name + '.conll', out_name + '.tr', args.viterbi_decode, -1, args.cuda)
+        out_name + '.conll', out_name + '.tr', args.viterbi_decode, use_cuda=args.cuda)
 
     if args.generative:
       # score the model 
@@ -242,13 +259,13 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
       store_this_iter = True
       # Save the model.
       if args.save_model != '':
-        model_fn = args.working_dir + '/' + args.save_model + '_stack.pt'
+        model_fn = args.working_dir + '/' + args.save_model + '.pt'
         with open(model_fn, 'wb') as f:
           torch.save(stack_model, f)
 
     if args.store_all_iterations:
-      model_fn = (args.working_dir + '/' + args.save_model + '_stack.'
-                  + str(epoch) + '.pt')
+      model_fn = (args.working_dir + '/' + args.save_model + '.' + str(epoch) 
+                  + '.pt')
       with open(model_fn, 'wb') as f:
         torch.save(stack_model, f)
 
