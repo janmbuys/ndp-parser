@@ -19,6 +19,10 @@ def training_decode(val_sentences, stack_model, word_vocab, conll_output_fn,
         transition_output_fn, max_sents=-1, use_cuda=False):
   stack_model.eval()
   decode_start_time = time.time()
+  greedy_loss = 0
+  length = 0
+  length_more = 0
+
   with open(conll_output_fn, 'w') as conll_fh:
     with open(transition_output_fn, 'w') as tr_fh:
       for i, val_sent in enumerate(val_sentences):
@@ -26,7 +30,10 @@ def training_decode(val_sentences, stack_model, word_vocab, conll_output_fn,
           break
         sentence_data = nn_utils.get_sentence_data_batch([val_sent], use_cuda,
             evaluation=True)
-        actions, dependents = stack_model.forward(sentence_data)
+        actions, dependents, greedy_word_loss = stack_model.forward(sentence_data)
+        greedy_loss += greedy_word_loss
+        length += len(val_sent) - 1 
+        length_more += len(val_sent) 
         action_str = ' '.join([data_utils.transition_to_str(act) 
                                for act in actions])
         tr_fh.write(action_str + '\n')
@@ -42,7 +49,16 @@ def training_decode(val_sentences, stack_model, word_vocab, conll_output_fn,
               '_', str(pred_parent), '_', '_', '_']) + '\n')
         conll_fh.write('\n')
   print('decode time {:2.2f}s'.format(time.time() - decode_start_time))
- 
+
+  val_loss = - greedy_loss[0] / length
+  val_loss_more = - greedy_loss[0] / length_more
+
+  print('| greedy valid loss {:5.2f} | valid ppl {:8.2f} '.format(
+       val_loss, math.exp(val_loss)))
+  print('       | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(
+       val_loss_more, math.exp(val_loss_more)))
+  print('-' * 89)
+
 
 def training_score(args, stack_model, val_sentences):
   val_batch_size = 1

@@ -29,8 +29,10 @@ def training_decode(val_sentences, stack_model, word_vocab, rel_vocab,
           break
         sentence_data = nn_utils.get_sentence_data_batch([val_sent], use_cuda,
             evaluation=True)
+        #gold_actions, _, _ = stack_model.oracle(val_sent.conll)
+
         actions, dependents, labels, greedy_word_loss = stack_model.forward(sentence_data,
-                viterbi_decode)
+                viterbi_decode) #gold_actions
         greedy_loss += greedy_word_loss
         length += len(val_sent) - 1 
         length_more += len(val_sent) 
@@ -50,16 +52,14 @@ def training_decode(val_sentences, stack_model, word_vocab, rel_vocab,
   print('-' * 89)
   print('decode time {:2.2f}s'.format(time.time() - decode_start_time))
 
-  val_loss = - greedy_loss[0] / length
-  val_loss_more = - greedy_loss[0] / length_more
+  if stack_model.generative:
+    val_loss = - greedy_loss[0] / length
+    val_loss_more = - greedy_loss[0] / length_more
 
-  print(val_loss)
-  print(math.exp(val_loss))
-
-  print('| greedy valid loss {:5.2f} | valid ppl {:8.2f} '.format(
-       val_loss, math.exp(val_loss)))
-  print('       | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(
-       val_loss_more, math.exp(val_loss_more)))
+    print('| greedy valid loss {:5.2f} | valid ppl {:8.2f} '.format(
+         val_loss, math.exp(val_loss)))
+    print('       | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(
+         val_loss_more, math.exp(val_loss_more)))
   print('-' * 89)
 
 
@@ -69,13 +69,18 @@ def training_score(args, stack_model, val_sentences):
   total_length_more = 0
 
   stack_model.eval()
+  viterbi_score = True
   
   print('Scoring val sentences')
   for val_sent in val_sentences:
     sentence_data = nn_utils.get_sentence_data_batch([val_sent], args.cuda,
         evaluation=True)
-    loss = stack_model.neg_log_likelihood(sentence_data) # inside_score
-    total_loss += loss.data
+    if viterbi_score:
+      loss = stack_model.viterbi_neg_log_likelihood(sentence_data)
+      total_loss += loss
+    else:
+      loss = stack_model.neg_log_likelihood(sentence_data) # inside_score
+      total_loss += loss.data[0]
     total_length += len(val_sent) - 1 
     total_length_more += len(val_sent) 
 
@@ -105,8 +110,8 @@ def decode(args, val_sentences, word_vocab, rel_vocab, score=False):
     total_loss, total_length, total_length_more = training_score(args,
         stack_model, val_sentences)
 
-    val_loss = total_loss[0] / total_length
-    val_loss_more = total_loss[0] / total_length_more
+    val_loss = total_loss / total_length
+    val_loss_more = total_loss / total_length_more
 
     print('-' * 89)
     print('| decoding time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
@@ -154,7 +159,7 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
   # run the oracle
   for sentence in sentences:
     # (transition_action, [direction], word_gen, relation_label) tuples
-    sentence.predictions, sentence.features = stack_model.oracle(sentence.conll, args.stack_next)
+    actions, sentence.predictions, sentence.features = stack_model.oracle(sentence.conll)
 
   prev_val_loss = None
   patience_count = 0
@@ -233,8 +238,8 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
       total_loss, total_length, total_length_more = training_score(args,
           stack_model, dev_sentences)
 
-      val_loss = total_loss[0] / total_length
-      val_loss_more = total_loss[0] / total_length_more
+      val_loss = total_loss / total_length
+      val_loss_more = total_loss / total_length_more
       print('-' * 89)
       print('| scoring time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
            (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
@@ -255,8 +260,8 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
       patience_count += 1
     else:
       patience_count = 0
-      prev_val_loss = val_loss
-      store_this_iter = True
+      if args.generative:
+        prev_val_loss = val_loss
       # Save the model.
       if args.save_model != '':
         model_fn = args.working_dir + '/' + args.save_model + '.pt'
@@ -271,5 +276,4 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
 
     if args.patience > 0 and patience_count >= args.patience:
       break
-
 

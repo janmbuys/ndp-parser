@@ -148,6 +148,7 @@ class ArcHybridSup(nn.Module):
     dependents = [-1 for _ in word_ids]
     labels = [-1 for _ in word_ids]
     greedy_word_loss = 0
+    greedy_loss = 0
 
     while buffer_index < sent_length or len(stack) > 1:
       #print(buffer_index)
@@ -168,6 +169,7 @@ class ArcHybridSup(nn.Module):
         return float(nn_utils.to_numpy(logit)) > 0
 
       if len(stack) > 1: # allowed to ra or la
+        transition_logit = self.transition_model(features)
         if buffer_index == sent_length:
           if given_actions is not None:
             assert action == data_utils._RA
@@ -180,8 +182,14 @@ class ArcHybridSup(nn.Module):
           else:
             sh_action = data_utils._SRE
         else:
-          transition_logit = self.transition_model(features)
+          #transition_logit = self.transition_model(features)
           sh_action = 1 if _test_logit(transition_logit) else 0
+        if self.generative:
+          if sh_action == 1:
+            transition_prob = self.binary_log_normalize(transition_logit)
+          else:
+            transition_prob = self.binary_log_normalize(-transition_logit)
+          greedy_loss += nn_utils.to_numpy(transition_prob.view(1))
 
         if sh_action == data_utils._SRE:
           if given_actions is not None:
@@ -207,6 +215,7 @@ class ArcHybridSup(nn.Module):
         word_distr = self.log_normalize(self.word_model(features)).view(-1)
         word_id = word_ids[buffer_index if self.stack_next else buffer_index+1]
         greedy_word_loss += nn_utils.to_numpy(word_distr[word_id])
+        greedy_loss += nn_utils.to_numpy(word_distr[word_id])
 
       num_actions += 1
       if given_actions is None:
@@ -228,8 +237,119 @@ class ArcHybridSup(nn.Module):
 
     actions = given_actions if given_actions is not None else predicted_actions
 
-    return actions, dependents, labels, greedy_word_loss
-  
+    return actions, dependents, labels, greedy_loss
+
+
+  def backtrack_path(self, i, j, split_indexes, directions):
+    """ Find action sequence for best path. """
+    if i == j - 1:
+      return [data_utils._SH]
+    else:
+      k = split_indexes[i, j]
+      direct = directions[i, j]
+      act = data_utils._LA if direct == data_utils._DLA else data_utils._RA
+      return (self.backtrack_path(i, k, split_indexes, directions) +
+              self.backtrack_path(k, j, split_indexes, directions) + [act])
+ 
+
+  def viterbi_score(self, encoder_features, word_ids):
+    # assume stack_next for now
+    assert self.stack_next
+    assert self.generative
+    sent_length = len(word_ids) - 1
+    seq_length = len(word_ids)
+
+    # compute all sh/re and word probabilities
+    shift_log_probs = np.zeros([seq_length, seq_length])
+    la_log_probs = np.zeros([seq_length, seq_length])
+    ra_log_probs = np.zeros([seq_length, seq_length])
+
+    word_log_probs = np.empty([sent_length, sent_length])
+    word_log_probs.fill(-np.inf)
+
+    features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
+        self.use_cuda, stack_next=self.stack_next)
+    re_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.transition_model(features)))
+    sh_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.transition_model(features)))
+
+    ra_dir_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.direction_model(features)))
+    la_dir_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.direction_model(features)))
+
+    word_distr_list = self.log_normalize(self.word_model(features))
+
+    counter = 0 
+    for i in range(seq_length-1):
+      for j in range(i+1, seq_length):
+        shift_log_probs[i, j] = sh_log_probs_list[counter] # counter, 0]
+        la_log_probs[i, j] = (re_log_probs_list[counter] 
+                              + la_dir_log_probs_list[counter])
+        ra_log_probs[i, j] = (re_log_probs_list[counter] 
+                              + ra_dir_log_probs_list[counter])
+
+        if j < sent_length: #TODO check - actually need prob of j-1 ?
+          word_log_probs[i, j] = nn_utils.to_numpy(
+              word_distr_list[counter, word_ids[j]])
+        counter += 1
+
+    table_size = seq_length
+    table = np.empty([table_size, table_size])
+    table.fill(-np.inf) # log probabilities
+    table_ned = np.empty([table_size, table_size]) # no end reduce
+    table_ned.fill(-np.inf) # log probabilities
+
+    split_indexes = np.zeros((table_size, table_size), dtype=np.int)
+    directions = np.zeros((table_size, table_size), dtype=np.int)
+    directions.fill(data_utils._DRA) # default direction
+
+    for j in range(0, sent_length):
+      table[j, j+1] = 0
+      table_ned[j, j+1] = 0
+
+    word_seq_score = 0
+    final_reduce_score = 0 #TODO issue is how to compute EOS prob
+
+    for j in range(2, sent_length+1):
+      ned_block_scores = []
+      for i in range(j-2, -1, -1):
+        block_scores = []
+        block_directions = []
+        for k in range(i+1, j):
+          score = (table[i, k] + table[k, j] 
+                   + shift_log_probs[i, k] + word_log_probs[i, k])
+          ra_prob = ra_log_probs[k, j]
+          la_prob = la_log_probs[k, j]
+          if ra_prob > la_prob or j == sent_length:
+            score += ra_prob
+            block_directions.append(data_utils._DRA)
+          else:
+            score += la_prob
+            block_directions.append(data_utils._DLA)
+          block_scores.append(score)
+          if i == 0:
+            ned_score = (table[0, k] + table_ned[k, j] 
+                         + shift_log_probs[0, k] + word_log_probs[0, k])
+            ned_block_scores.append(ned_score)
+        ind = np.argmax(block_scores)
+        k = ind + i + 1
+        table[i, j] = block_scores[ind]
+        split_indexes[i, j] = k
+        directions[i, j] = block_directions[ind]
+        # No final reduce, don't compute p(w_{j-1}) yet.
+        ned_score = table[i, j-1] + table[j-1, j] + shift_log_probs[i, j-1]
+        table_ned[i, j] = ned_score # is table_ned[0, j] == ned_block_score[j-1]
+      # if i == 0:
+      ind = np.argmax(ned_block_scores)
+      split_index = ind + 1 
+      path_score = ned_block_scores[ind]
+      ##if path_score < table_ned[0, j]
+
+      if j < sent_length:
+        word_seq_score += word_log_probs[split_index, j]
+
+    #actions = backtrack_path(0, sent_length)
+    #return self.greedy_decode(encoder_features, word_ids, actions)
+    return word_seq_score
+ 
 
   def viterbi_decode(self, encoder_features, word_ids):
     #TODO extend to la/ra (direction model)
@@ -330,8 +450,19 @@ class ArcHybridSup(nn.Module):
     encoder_state = self.encoder_model.init_hidden(batch_size)
     encoder_features = self.encoder_model(sentence, encoder_state)
 
+    #loss = -self.viterbi_score(encoder_features, sentence)
     loss = -torch.sum(self.inside_algorithm(
         encoder_features, sentence, batch_size))
+    return loss
+
+
+  def viterbi_neg_log_likelihood(self, sentence):
+    batch_size = sentence.size()[1]
+    encoder_state = self.encoder_model.init_hidden(batch_size)
+    encoder_features = self.encoder_model(sentence, encoder_state)
+    word_ids = [int(x) for x in sentence.view(-1).data]
+
+    loss = -self.viterbi_score(encoder_features, word_ids)
     return loss
 
 
@@ -387,12 +518,15 @@ class ArcHybridSup(nn.Module):
     return loss
 
 
-  def forward(self, sentence, viterbi=True):
+  def forward(self, sentence, viterbi=True, gold_actions=None):
     encoder_state = self.encoder_model.init_hidden(1) # batch_size==1
     encoder_features = self.encoder_model(sentence, encoder_state)
     word_ids = [int(x) for x in sentence.view(-1).data]
 
-    if viterbi:
+    if gold_actions is not None:
+      return self.greedy_decode(encoder_features, word_ids,
+          given_actions=gold_actions)
+    elif viterbi:
       return self.viterbi_decode(encoder_features, word_ids)
     else:
       return self.greedy_decode(encoder_features, word_ids)
@@ -415,7 +549,7 @@ class ArcHybridSup(nn.Module):
     return stackops, directions
 
 
-  def oracle(self, conll, stack_next=False):
+  def oracle(self, conll):
     """Training oracle for single parsed sentence, not in computation graph."""
     stack = data_utils.ParseForest([])
     buf = data_utils.ParseForest([conll[0]])
@@ -451,7 +585,7 @@ class ArcHybridSup(nn.Module):
               action = data_utils._RA 
    
       position = nn_utils.extract_feature_positions(buffer_index, s0,
-          more_context=False, stack_next=stack_next) #(stack ind, buffer ind)
+          more_context=False, stack_next=self.stack_next) #(stack ind, buffer ind)
       tr_features.append(position)
       actions.append(action)
       
@@ -491,5 +625,5 @@ class ArcHybridSup(nn.Module):
 
     features = list(map(lambda x: torch.LongTensor(x).view(-1, 1, 2), 
                         [tr_features, gen_features, label_features]))
-    return predictions, features 
+    return actions, predictions, features 
 

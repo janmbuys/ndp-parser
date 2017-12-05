@@ -50,7 +50,7 @@ class Classifier(nn.Module):
       positions_var = nn_utils.to_var(torch.LongTensor(positions), self.use_cuda)
       flat_features = torch.index_select(cat_features, 1, positions_var).view(-1,
           self.encode_size)
-    elif self.multiplicative_combination:
+    elif False: #self.multiplicative_combination:
       col_features = features.view(-1, self.num_features, self.feature_size)
       flat_features = col_features[:,0,:] * col_features[:,1,:]
     else:

@@ -247,9 +247,15 @@ class ArcEagerDP(nn.Module):
     sent_length = len(word_ids) - 1
 
     dependents = [-1 for _ in word_ids]
+    greedy_word_loss = 0
 
     for action in actions:  
       pred_action = data_utils._ESH
+
+      s0 = stack[-1] if len(stack) > 0 else 0
+      position = nn_utils.extract_feature_positions(
+          buffer_index, s0, stack_next=self.stack_next)
+      features = nn_utils.select_features(encoder_features[1], position, self.use_cuda)
 
       if len(stack) > 0: # allowed to ra or la
         if buffer_index == sent_length:
@@ -271,6 +277,11 @@ class ArcEagerDP(nn.Module):
           else:
             assert action == data_utils._LA
 
+      if action == data_utils._SH or action == data_utils._RA:
+        word_distr = self.log_normalize(self.word_model(features)).view(-1)
+        word_id = word_ids[buffer_index if self.stack_next else buffer_index+1]
+        greedy_word_loss += nn_utils.to_numpy(word_distr[word_id])
+
       # excecute action
       if action == data_utils._SH or action == data_utils._RA:
         if action == data_utils._RA:
@@ -288,7 +299,7 @@ class ArcEagerDP(nn.Module):
         else: # left-arc
           dependents[child] = buffer_index
 
-    return actions, dependents
+    return actions, dependents, greedy_word_loss
 
 
   def _viterbi_algorithm(self, encoder_features, word_ids):
