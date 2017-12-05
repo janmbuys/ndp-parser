@@ -236,7 +236,6 @@ class ArcHybridSup(nn.Module):
         labels[child] = label
 
     actions = given_actions if given_actions is not None else predicted_actions
-
     return actions, dependents, labels, greedy_loss
 
 
@@ -349,7 +348,7 @@ class ArcHybridSup(nn.Module):
     #actions = backtrack_path(0, sent_length)
     #return self.greedy_decode(encoder_features, word_ids, actions)
     return word_seq_score
- 
+
 
   def viterbi_decode(self, encoder_features, word_ids):
     #TODO extend to la/ra (direction model)

@@ -32,7 +32,7 @@ def training_decode(val_sentences, stack_model, word_vocab, rel_vocab,
         #gold_actions, _, _ = stack_model.oracle(val_sent.conll)
 
         actions, dependents, labels, greedy_word_loss = stack_model.forward(sentence_data,
-                viterbi_decode) #gold_actions
+                viterbi_decode) 
         greedy_loss += greedy_word_loss
         length += len(val_sent) - 1 
         length_more += len(val_sent) 
