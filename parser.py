@@ -59,6 +59,9 @@ if __name__=='__main__':
   parser.add_argument('--test', action='store_true', 
                       help='Evaluate test set', 
                       default=False)
+  parser.add_argument('--generate', action='store_true', 
+                      help='Generate samples from existing model', 
+                      default=False)
   parser.add_argument('--decode_at_checkpoints', action='store_true', 
                       help='Decode at training checkpoints', 
                       default=False)
@@ -159,6 +162,8 @@ if __name__=='__main__':
                       help='store model at all iterations')
   parser.add_argument('--save_model', type=str,  default='model',
                       help='path to save the final model, exclude extension')
+  parser.add_argument('--num_samples', type=int, default=100, 
+                      metavar='N', help='num samples to generate')
 
   args = parser.parse_args()
   assert not (args.generative and args.bidirectional), 'Bidirectional encoder invalid for generative model'
@@ -207,7 +212,9 @@ if __name__=='__main__':
     else: 
       unsupervised_parser.train(args, sentences, val_sentences, word_vocab)
   elif args.batched:
-    if args.decode:          
+    if args.generate:
+      supervised_parser_batched.generate(args, val_sentences, word_vocab, rel_vocab)
+    elif args.decode:          
       supervised_parser_batched.decode(args, val_sentences, word_vocab, rel_vocab)
     elif args.score:
       supervised_parser_batched.decode(args, val_sentences, word_vocab, rel_vocab, score=True)

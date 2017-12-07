@@ -80,22 +80,26 @@ class ArcHybridSup(nn.Module):
     counter = 0
     for i in range(seq_length-1):
       for j in range(i+1, seq_length):
-        inds_table[i, j-1 if self.stack_next else j] = counter
+        #inds_table[i, j-1 if self.stack_next else j] = counter
+        inds_table[i, j] = counter
         counter += 1
 
     def get_feature_index(i, j):
-      return inds_table[i, j-1 if self.stack_next else j]
+      #return inds_table[i, j-1 if self.stack_next else j]
+      return inds_table[i, j]
 
     # rather enumerate indexes for the reverse
     rev_inds_table = np.zeros((seq_length, seq_length), dtype=np.int)
     counter = 0
     for j in range(1, seq_length):
       for i in range(j):
-        rev_inds_table[i, j-1 if self.stack_next else j] = counter
+        #rev_inds_table[i, j-1 if self.stack_next else j] = counter
+        rev_inds_table[i, j] = counter
         counter += 1
 
     def get_rev_feature_index(i, j):
-      return rev_inds_table[i, j-1 if self.stack_next else j]
+      #return rev_inds_table[i, j-1 if self.stack_next else j]
+      return rev_inds_table[i, j]
 
     table_size = sentence.size()[0]
     table = nn_utils.to_var(torch.FloatTensor(table_size, table_size, 
@@ -133,8 +137,146 @@ class ArcHybridSup(nn.Module):
         #print(nn_utils.log_sum_exp(all_block_scores, 1).size())
         table[0:max(i, 1), i, j] = nn_utils.log_sum_exp(all_block_scores, 1)
      
-    final_score = re_rev_log_probs_list[get_rev_feature_index(0, sent_length)]
-    return table[0, 0, sent_length] + final_score
+    # actually needed, but not trained
+    #final_score = re_rev_log_probs_list[get_rev_feature_index(0, sent_length)]
+    return table[0, 0, sent_length] #+ final_score
+
+
+  def greedy_generate(self, encoder_features, word_ids, given_actions=None):
+    assert self.generative
+    assert self.stack_next
+    #TODO later support partially given sentence
+    stack = []
+    buffer_index = 0
+    #TODO now prespecify length - need a heuristic to predict EOS...
+    sent_length = len(word_ids) - 1
+    #print("sentence length %d" % sent_length) 
+    self.eval()
+    root_id = word_ids[0] #word_vocab.get_id('*root*')
+    word_id = root_id
+
+    num_actions = 0
+    predicted_actions = []
+    dependents = [-1]
+    labels = [-1]
+    sentence = []
+    hidden = self.encoder_model.init_hidden(1)
+    encoder_output = []
+
+    greedy_word_loss = 0
+    greedy_loss = 0
+    has_eos = False
+
+    #while buffer_index < sent_length or len(stack) > 1:
+    while not has_eos:
+      #print(buffer_index)
+      if given_actions is not None:
+        assert len(given_actions) > num_actions
+        action = given_actions[num_actions]
+      else:
+        action = data_utils._SH
+
+      label = -1
+      s0 = stack[-1] if len(stack) > 0 else 0
+
+      if buffer_index > 0:
+        position = nn_utils.extract_feature_positions(
+            buffer_index, s0, stack_next=self.stack_next)
+        #nn_utils.select_features(encoder_output, position, self.use_cuda)
+        features = torch.cat([encoder_output[ind] for ind in position], 0)
+
+      def _test_logit(logit):
+        return float(nn_utils.to_numpy(logit)) > 0
+
+      if len(stack) > 1: # allowed to ra or la
+        transition_logit = self.transition_model(features)
+        if buffer_index == sent_length:
+          if given_actions is not None:
+            assert action == data_utils._RA
+          else:
+            action = data_utils._RA
+          sh_action = data_utils._SRE
+        elif given_actions is not None:
+          if action == data_utils._SH:
+            sh_action = data_utils._SSH
+          else:
+            sh_action = data_utils._SRE
+        else:
+          #transition_logit = self.transition_model(features)
+          sh_action = 1 if _test_logit(transition_logit) else 0
+        if self.generative:
+          if sh_action == 1:
+            transition_prob = self.binary_log_normalize(transition_logit)
+          else:
+            transition_prob = self.binary_log_normalize(-transition_logit)
+          greedy_loss += nn_utils.to_numpy(transition_prob.view(1))
+
+        if sh_action == data_utils._SRE:
+          if given_actions is not None:
+            if action == data_utils._LA:
+              direc = data_utils._DLA  
+            else:
+              direc = data_utils._DRA
+          else:
+            direction_logit = self.direction_model(features)  
+            direc = 1 if _test_logit(direction_logit) else 0
+
+            if direc == data_utils._DLA:
+              action = data_utils._LA
+            else:
+              action = data_utils._RA
+        
+        if action != data_utils._SH:
+          relation_logit = self.relation_model(features)      
+          relation_logit_np = nn_utils.to_numpy(relation_logit)
+          label = int(relation_logit_np.argmax(axis=1)[0])
+        
+      num_actions += 1
+      if given_actions is None:
+        predicted_actions.append(action)
+      #print("action %d" % action)
+
+      # excecute action
+      if action == data_utils._SH:
+        stack.append(buffer_index)
+        # generate next word
+        if buffer_index == 0:
+          word_id = root_id
+        else:
+          logits = self.word_model(features)
+          word_log_distr = self.log_normalize(logits).view(-1)
+          word_distr = torch.nn.functional.softmax(logits.view(-1))
+          word_sample = torch.multinomial(word_distr, 1).view(1)
+          word_id = int(nn_utils.to_numpy(word_sample))
+
+          greedy_word_loss += nn_utils.to_numpy(word_log_distr[word_id].view(1))
+          greedy_loss += nn_utils.to_numpy(word_log_distr[word_id].view(1))
+        sentence.append(word_id)
+
+        # compute next hidden state
+        id_tensor = torch.LongTensor([word_id]).view(1, 1)
+        embed = self.encoder_model.drop(self.encoder_model.embed(nn_utils.to_var(id_tensor,
+            self.use_cuda, True)).view(1, 1, -1))
+        output, hidden = self.encoder_model.rnn(embed, hidden)
+        output = self.encoder_model.drop(output)
+        encoder_output.append(output)
+         
+        dependents.append(-1)
+        labels.append(-1)
+        buffer_index += 1
+      else:  
+        assert len(stack) > 0
+        child = stack.pop()
+        if action == data_utils._LA:
+          dependents[child] = buffer_index
+        else:
+          dependents[child] = stack[-1]
+          if len(stack) == 1 and len(sentence) > 1:
+            has_eos = True
+        labels[child] = label
+
+    actions = given_actions if given_actions is not None else predicted_actions
+    return actions, dependents, labels, sentence, -greedy_loss[0]
 
 
   def greedy_decode(self, encoder_features, word_ids, given_actions=None):
@@ -213,9 +355,10 @@ class ArcHybridSup(nn.Module):
         
       if self.generative and action == data_utils._SH:
         word_distr = self.log_normalize(self.word_model(features)).view(-1)
-        word_id = word_ids[buffer_index if self.stack_next else buffer_index+1]
-        greedy_word_loss += nn_utils.to_numpy(word_distr[word_id])
-        greedy_loss += nn_utils.to_numpy(word_distr[word_id])
+        if not self.stack_next or buffer_index > 0:
+          word_id = word_ids[buffer_index if self.stack_next else buffer_index+1]
+          greedy_word_loss += nn_utils.to_numpy(word_distr[word_id].view(1))
+          greedy_loss += nn_utils.to_numpy(word_distr[word_id].view(1))
 
       num_actions += 1
       if given_actions is None:
@@ -236,7 +379,7 @@ class ArcHybridSup(nn.Module):
         labels[child] = label
 
     actions = given_actions if given_actions is not None else predicted_actions
-    return actions, dependents, labels, greedy_loss
+    return actions, dependents, labels, -greedy_loss[0]
 
 
   def backtrack_path(self, i, j, split_indexes, directions):
@@ -285,7 +428,7 @@ class ArcHybridSup(nn.Module):
         ra_log_probs[i, j] = (re_log_probs_list[counter] 
                               + ra_dir_log_probs_list[counter])
 
-        if j < sent_length: #TODO check - actually need prob of j-1 ?
+        if j < sent_length:
           word_log_probs[i, j] = nn_utils.to_numpy(
               word_distr_list[counter, word_ids[j]])
         counter += 1
@@ -325,8 +468,9 @@ class ArcHybridSup(nn.Module):
             block_directions.append(data_utils._DLA)
           block_scores.append(score)
           if i == 0:
-            ned_score = (table[0, k] + table_ned[k, j] 
-                         + shift_log_probs[0, k] + word_log_probs[0, k])
+            ned_score = score
+            #ned_score = (table[0, k] + table_ned[k, j] 
+            #             + shift_log_probs[0, k] + word_log_probs[0, k])
             ned_block_scores.append(ned_score)
         ind = np.argmax(block_scores)
         k = ind + i + 1
@@ -339,15 +483,126 @@ class ArcHybridSup(nn.Module):
       # if i == 0:
       ind = np.argmax(ned_block_scores)
       split_index = ind + 1 
-      path_score = ned_block_scores[ind]
+      #path_score = ned_block_scores[ind]
       ##if path_score < table_ned[0, j]
-
       if j < sent_length:
         word_seq_score += word_log_probs[split_index, j]
 
     #actions = backtrack_path(0, sent_length)
     #return self.greedy_decode(encoder_features, word_ids, actions)
     return word_seq_score
+
+  # score outside computation graph
+  def inside_score_cubic(self, encoder_features, word_ids):
+    sent_length = len(word_ids) - 1
+    seq_length = len(word_ids)
+
+    # compute all sh/re and word probabilities
+    shift_log_probs = np.zeros([seq_length, seq_length])
+    reduce_log_probs = np.zeros([seq_length, seq_length])
+    word_log_probs = np.empty([sent_length, sent_length])
+    word_log_probs.fill(-np.inf)
+
+    features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
+        self.use_cuda, stack_next=self.stack_next)
+    re_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.transition_model(features)))
+    sh_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.transition_model(features)))
+
+    word_distr_list = self.log_normalize(self.word_model(features))
+
+    counter = 0 
+    for i in range(seq_length-1):
+      for j in range(i+1, seq_length):
+        shift_log_probs[i, j] = sh_log_probs_list[counter]
+        reduce_log_probs[i, j] = re_log_probs_list[counter]
+
+        if j < sent_length:
+          word_log_probs[i, j] = nn_utils.to_numpy(
+              word_distr_list[counter, word_ids[j if self.stack_next else j+1]])
+        counter += 1
+
+    table_size = seq_length
+    table = np.empty([table_size, table_size])
+    table.fill(-np.inf) # log probabilities
+
+    for j in range(0, sent_length):
+      table[j, j+1] = 0
+
+    for j in range(2, sent_length+1):
+      for i in range(j-2, -1, -1):
+        block_score = -np.inf
+        block_scores = []
+        for k in range(i+1, j):
+          score = (table[i, k] + table[k, j] + reduce_log_probs[k, j] 
+                   + shift_log_probs[i, k] + word_log_probs[i, k]) 
+          block_score = np.logaddexp(block_score, score)
+          block_scores.append(score)
+        #print("sum %f" % float(block_score))
+        #print("argmax %f" % float(block_scores[np.argmax(block_scores)]))
+        #table[i, j] = block_scores[np.argmax(block_scores)]
+        table[i, j] = block_score
+
+    #print("sum % f" % float(table[0, sent_length]))
+    #print("argmax % f" % float(table_max[0, sent_length]))
+    return table[0, sent_length]
+
+
+  # score outside computation graph
+  def inside_score(self, encoder_features, word_ids):
+    sent_length = len(word_ids) - 1
+    seq_length = len(word_ids)
+
+    # compute all sh/re and word probabilities
+    shift_log_probs = np.zeros([seq_length, seq_length])
+    reduce_log_probs = np.zeros([seq_length, seq_length])
+    word_log_probs = np.empty([sent_length, sent_length])
+    word_log_probs.fill(-np.inf)
+
+    features = nn_utils.batch_feature_selection(encoder_features[1], seq_length,
+        self.use_cuda, stack_next=self.stack_next)
+    re_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(self.transition_model(features)))
+    sh_log_probs_list = nn_utils.to_numpy(self.binary_log_normalize(-self.transition_model(features)))
+
+    word_distr_list = self.log_normalize(self.word_model(features))
+
+    counter = 0 
+    for i in range(seq_length-1):
+      for j in range(i+1, seq_length):
+        shift_log_probs[i, j] = sh_log_probs_list[counter]
+        reduce_log_probs[i, j] = re_log_probs_list[counter]
+
+        if j < sent_length:
+          word_log_probs[i, j] = nn_utils.to_numpy(
+              word_distr_list[counter, word_ids[j if self.stack_next else j+1]])
+        counter += 1
+
+    table_size = seq_length
+    table = np.empty([table_size, table_size, table_size])
+    table.fill(-np.inf) # log probabilities
+
+    # first word prob 
+    if not self.stack_next:
+      init_features = nn_utils.select_features(encoder_features[1], [0, 0], self.use_cuda)
+      init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
+      table[0, 0, 1] = nn_utils.to_numpy(init_word_distr[word_ids[1]])
+    else:
+      table[0, 0, 1] = 0
+
+    for j in range(2, sent_length+1):
+      for i in range(j-1):
+        table[i, j-1, j] = shift_log_probs[i, j-1] + word_log_probs[i, j-1]
+      for i in range(j-2, -1, -1):
+        for l in range(max(i, 1)): # l=0 if i=0
+          block_score = -np.inf
+          block_scores = []
+          for k in range(i+1, j):
+            score = table[l, i, k] + table[i, k, j] + reduce_log_probs[k, j]
+            block_score = np.logaddexp(block_score, score)
+            block_scores.append(score)
+          #table[l, i, j] = block_scores[np.argmax(block_scores)] 
+          table[l, i, j] = block_score
+
+    return table[0, 0, sent_length]
 
 
   def viterbi_decode(self, encoder_features, word_ids):
@@ -448,10 +703,14 @@ class ArcHybridSup(nn.Module):
     batch_size = sentence.size()[1]
     encoder_state = self.encoder_model.init_hidden(batch_size)
     encoder_features = self.encoder_model(sentence, encoder_state)
+    word_ids = [int(x) for x in sentence.view(-1).data]
 
-    #loss = -self.viterbi_score(encoder_features, sentence)
-    loss = -torch.sum(self.inside_algorithm(
-        encoder_features, sentence, batch_size))
+    #For values (remove .data for training)
+    #loss = -torch.sum(self.inside_algorithm(
+    #    encoder_features, sentence, batch_size)).data[0]
+
+    #loss = -self.inside_score(encoder_features, word_ids)
+    loss = -self.inside_score_cubic(encoder_features, word_ids)
     return loss
 
 
@@ -515,6 +774,20 @@ class ArcHybridSup(nn.Module):
 
     #loss = loss/(sent_length*batch_size) #TODO test - LM does not average
     return loss
+
+
+  def generate(self, sentence, viterbi=True, gold_actions=None):
+    encoder_state = self.encoder_model.init_hidden(1) # batch_size==1
+    encoder_features = self.encoder_model(sentence, encoder_state)
+    word_ids = [int(x) for x in sentence.view(-1).data]
+
+    if gold_actions is not None:
+      return self.greedy_generate(encoder_features, word_ids,
+          given_actions=gold_actions)
+    #elif viterbi:
+    #  return self.viterbi_decode(encoder_features, word_ids)
+    else:
+      return self.greedy_generate(encoder_features, word_ids)
 
 
   def forward(self, sentence, viterbi=True, gold_actions=None):

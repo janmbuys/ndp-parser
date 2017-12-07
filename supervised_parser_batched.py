@@ -33,6 +33,7 @@ def training_decode(val_sentences, stack_model, word_vocab, rel_vocab,
 
         actions, dependents, labels, greedy_word_loss = stack_model.forward(sentence_data,
                 viterbi_decode) 
+        #print(greedy_word_loss)
         greedy_loss += greedy_word_loss
         length += len(val_sent) - 1 
         length_more += len(val_sent) 
@@ -53,13 +54,66 @@ def training_decode(val_sentences, stack_model, word_vocab, rel_vocab,
   print('decode time {:2.2f}s'.format(time.time() - decode_start_time))
 
   if stack_model.generative:
-    val_loss = - greedy_loss[0] / length
-    val_loss_more = - greedy_loss[0] / length_more
+    val_loss = greedy_loss / length # [0]
+    val_loss_more = greedy_loss / length_more
 
     print('| greedy valid loss {:5.2f} | valid ppl {:8.2f} '.format(
          val_loss, math.exp(val_loss)))
     print('       | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(
          val_loss_more, math.exp(val_loss_more)))
+  print('-' * 89)
+
+
+def sentence_generate(val_sentences, stack_model, word_vocab, rel_vocab, 
+        conll_output_fn, viterbi_decode, max_sents=-1, use_cuda=False):
+
+  greedy_loss = 0
+  length = 0
+  length_more = 0
+  stack_model.eval()
+  decode_start_time = time.time()
+
+  with open(conll_output_fn, 'w') as conll_fh:
+    print("generating %d sentences." % len(val_sentences))
+    for i, val_sent in enumerate(val_sentences):
+      if max_sents > 0 and i > max_sents:
+        break
+      sentence_data = nn_utils.get_sentence_data_batch([val_sent], use_cuda,
+          evaluation=True)
+      gold_actions, _, _ = stack_model.oracle(val_sent.conll)
+
+      actions, dependents, labels, word_ids, greedy_word_loss = stack_model.generate(sentence_data,
+              False) #, gold_actions) #TODO parameterize actions given
+      greedy_loss += greedy_word_loss
+      length += len(word_ids) - 1 
+      length_more += len(word_ids) 
+      #TODO store words
+      sentence = [word_vocab.get_word(word) for word in word_ids]
+      sentence_str = ' '.join([word_vocab.get_word(word) 
+                               for word in word_ids[1:]])
+      print(sentence_str)
+
+      #action_str = ' '.join([data_utils.transition_to_str(act) 
+      #                       for act in actions])
+      #tr_fh.write(action_str + '\n')
+      for i, word_str in enumerate(sentence):
+        if i > 0:
+          pred_parent = dependents[i]
+          pred_label = labels[i] ##
+          pred_relation = rel_vocab.get_word(labels[i])
+          conll_fh.write('\t'.join([word_str, word_str, '_', 
+            '_', '_', '_', str(pred_parent), pred_relation, '_', '_']) + '\n')
+      conll_fh.write('\n')
+  print('-' * 89)
+  print('decode time {:2.2f}s'.format(time.time() - decode_start_time))
+
+  val_loss = greedy_loss / length # [0]
+  val_loss_more = greedy_loss / length_more
+
+  print('| greedy valid loss {:5.2f} | valid ppl {:8.2f} '.format(
+       val_loss, math.exp(val_loss)))
+  print('       | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(
+       val_loss_more, math.exp(val_loss_more)))
   print('-' * 89)
 
 
@@ -69,7 +123,7 @@ def training_score(args, stack_model, val_sentences):
   total_length_more = 0
 
   stack_model.eval()
-  viterbi_score = True
+  viterbi_score = False
   
   print('Scoring val sentences')
   for val_sent in val_sentences:
@@ -80,11 +134,37 @@ def training_score(args, stack_model, val_sentences):
       total_loss += loss
     else:
       loss = stack_model.neg_log_likelihood(sentence_data) # inside_score
-      total_loss += loss.data[0]
+      #print(loss)
+      total_loss += loss #.data[0]
     total_length += len(val_sent) - 1 
     total_length_more += len(val_sent) 
+  print("Total loss %f" % float(total_loss))
 
   return total_loss, total_length, total_length_more
+
+
+def generate(args, val_sentences, word_vocab, rel_vocab):
+  vocab_size = len(word_vocab)
+  num_relations = len(rel_vocab)
+  model_path = args.working_dir + '/' + args.save_model
+  non_lin = args.non_lin #TODO better interface
+  gen_non_lin = args.gen_non_lin
+
+  assert model_path != ''
+  print('Loading models')
+  model_fn = model_path + '.pt'
+  with open(model_fn, 'rb') as f:
+    stack_model = torch.load(f)
+ 
+  if args.cuda:
+    stack_model.cuda()
+
+  print('Done loading models')
+
+  #TODO write generated samples to file
+  out_name = args.working_dir + '/' + args.dev_name 
+  sentence_generate(val_sentences, stack_model, word_vocab, rel_vocab, out_name
+      + '.generate.conll', args.viterbi_decode, use_cuda=args.cuda)
 
 
 def decode(args, val_sentences, word_vocab, rel_vocab, score=False):

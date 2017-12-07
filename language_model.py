@@ -52,6 +52,9 @@ if __name__=='__main__':
   parser.add_argument('--score', action='store_true', 
                       help='Only score, assuming existing model', 
                       default=False)
+  parser.add_argument('--generate', action='store_true', 
+                      help='Generate samples from existing model', 
+                      default=False)
   parser.add_argument('--test', action='store_true', 
                       help='Evaluate test set', 
                       default=False)
@@ -102,6 +105,8 @@ if __name__=='__main__':
                       metavar='N', help='report ppl every x steps')
   parser.add_argument('--save_model', type=str,  default='model.pt',
                       help='path to save the final model')
+  parser.add_argument('--num_samples', type=int, default=100, 
+                      metavar='N', help='num samples to generate')
 
   args = parser.parse_args()
 
@@ -150,6 +155,54 @@ if __name__=='__main__':
     dev_sentences = dev_sentences #[:100]
 
   #data_utils.create_length_histogram(sentences)
+
+  def generate(val_sentences):
+    #TODO use val_sentences later for conditional generation
+    vocab_size = len(word_vocab)
+
+    working_path = args.working_dir + '/'
+    print('Loading model')
+    # Load model.
+    model_fn = working_path + args.save_model
+    with open(model_fn, 'rb') as f:
+      model = torch.load(f)
+    if args.cuda:
+      model.cuda()
+    print('Done loading model')
+
+    model.eval()
+    root_id = word_vocab.get_id('*root*')
+    log_normalize = nn.LogSoftmax()
+    greedy_loss = 0
+    length = 0
+
+    for _ in range(args.num_samples):
+      word_id = root_id
+      sentence = [root_id]
+      hidden = model.init_hidden(1)
+
+      while word_id != data_utils._EOS: # why not do this in the model?
+        id_tensor = torch.LongTensor([word_id]).view(1, 1)
+        embed = model.drop(model.embed(nn_utils.to_var(id_tensor, args.cuda,
+          True)).view(1, 1, -1))
+        output, hidden = model.rnn(embed, hidden)
+        output = model.drop(output).view(1, -1)
+        logits = model.project(output).view(-1)
+        word_log_distr = log_normalize(logits)
+        distr = torch.nn.functional.softmax(logits)
+        word_sample = torch.multinomial(distr, 1).view(1)
+        word_id = int(nn_utils.to_numpy(word_sample))
+        sentence.append(word_id)
+        greedy_loss += nn_utils.to_numpy(word_log_distr[word_id].view(1))
+     
+      length += len(sentence) - 2
+      sentence_str = ' '.join([word_vocab.get_word(word) 
+                               for word in sentence[1:-1]])
+      print(sentence_str)
+    val_loss = - greedy_loss[0] / length
+    print('| greedy valid loss {:5.2f} | valid ppl {:8.2f} '.format(
+        val_loss, math.exp(val_loss)))
+
 
   def score(val_sentences):
     vocab_size = len(word_vocab)
@@ -335,6 +388,8 @@ if __name__=='__main__':
       score(test_sentences)    
     else:
       score(dev_sentences)    
+  elif args.generate:
+    generate(dev_sentences)
   else:
     train()
 
