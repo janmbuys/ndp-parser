@@ -138,17 +138,18 @@ class ArcHybridSup(nn.Module):
         table[0:max(i, 1), i, j] = nn_utils.log_sum_exp(all_block_scores, 1)
      
     # actually needed, but not trained
-    #final_score = re_rev_log_probs_list[get_rev_feature_index(0, sent_length)]
-    return table[0, 0, sent_length] #+ final_score
+    if self.stack_next:
+      final_score = re_rev_log_probs_list[get_rev_feature_index(0, sent_length)]
+    else:
+      final_score = 0
+    return table[0, 0, sent_length] + final_score
 
 
   def greedy_generate(self, encoder_features, word_ids, given_actions=None):
     assert self.generative
-    assert self.stack_next
     #TODO later support partially given sentence
     stack = []
     buffer_index = 0
-    #TODO now prespecify length - need a heuristic to predict EOS...
     sent_length = len(word_ids) - 1
     #print("sentence length %d" % sent_length) 
     self.eval()
@@ -167,6 +168,17 @@ class ArcHybridSup(nn.Module):
     greedy_loss = 0
     has_eos = False
 
+    if not self.stack_next:
+      sentence.append(word_id)
+      id_tensor = torch.LongTensor([word_id]).view(1, 1)
+      embed = self.encoder_model.drop(self.encoder_model.embed(nn_utils.to_var(id_tensor,
+              self.use_cuda, True)).view(1, 1, -1))
+      output, hidden = self.encoder_model.rnn(embed, hidden)
+      output = self.encoder_model.drop(output)
+      encoder_output.append(output)
+      dependents.append(-1)
+      labels.append(-1)
+
     #while buffer_index < sent_length or len(stack) > 1:
     while not has_eos:
       #print(buffer_index)
@@ -179,7 +191,7 @@ class ArcHybridSup(nn.Module):
       label = -1
       s0 = stack[-1] if len(stack) > 0 else 0
 
-      if buffer_index > 0:
+      if buffer_index > 0 or not self.stack_next:
         position = nn_utils.extract_feature_positions(
             buffer_index, s0, stack_next=self.stack_next)
         #nn_utils.select_features(encoder_output, position, self.use_cuda)
@@ -188,22 +200,20 @@ class ArcHybridSup(nn.Module):
       def _test_logit(logit):
         return float(nn_utils.to_numpy(logit)) > 0
 
-      if len(stack) > 1: # allowed to ra or la
+      if len(stack) > 1 or (self.stack_next and len(stack) > 0): # allowed to ra or la
         transition_logit = self.transition_model(features)
-        if buffer_index == sent_length:
-          if given_actions is not None:
+        if given_actions is not None:
+          if buffer_index == sent_length:
             assert action == data_utils._RA
-          else:
-            action = data_utils._RA
-          sh_action = data_utils._SRE
-        elif given_actions is not None:
-          if action == data_utils._SH:
+            sh_action = data_utils._SRE
+          elif action == data_utils._SH:
             sh_action = data_utils._SSH
           else:
             sh_action = data_utils._SRE
         else:
-          #transition_logit = self.transition_model(features)
-          sh_action = 1 if _test_logit(transition_logit) else 0
+          #sh_action = 1 if _test_logit(transition_logit) else 0
+          tr_sample = torch.bernoulli(torch.sigmoid(transition_logit))
+          sh_action = int(nn_utils.to_numpy(tr_sample)) 
         if self.generative:
           if sh_action == 1:
             transition_prob = self.binary_log_normalize(transition_logit)
@@ -219,7 +229,9 @@ class ArcHybridSup(nn.Module):
               direc = data_utils._DRA
           else:
             direction_logit = self.direction_model(features)  
-            direc = 1 if _test_logit(direction_logit) else 0
+            #direc = 1 if _test_logit(direction_logit) else 0
+            dir_sample = torch.bernoulli(torch.sigmoid(direction_logit))
+            direc = int(nn_utils.to_numpy(dir_sample)) 
 
             if direc == data_utils._DLA:
               action = data_utils._LA
@@ -240,7 +252,7 @@ class ArcHybridSup(nn.Module):
       if action == data_utils._SH:
         stack.append(buffer_index)
         # generate next word
-        if buffer_index == 0:
+        if buffer_index == 0 and self.stack_next:
           word_id = root_id
         else:
           logits = self.word_model(features)
@@ -251,28 +263,31 @@ class ArcHybridSup(nn.Module):
 
           greedy_word_loss += nn_utils.to_numpy(word_log_distr[word_id].view(1))
           greedy_loss += nn_utils.to_numpy(word_log_distr[word_id].view(1))
-        sentence.append(word_id)
-
-        # compute next hidden state
-        id_tensor = torch.LongTensor([word_id]).view(1, 1)
-        embed = self.encoder_model.drop(self.encoder_model.embed(nn_utils.to_var(id_tensor,
-            self.use_cuda, True)).view(1, 1, -1))
-        output, hidden = self.encoder_model.rnn(embed, hidden)
-        output = self.encoder_model.drop(output)
-        encoder_output.append(output)
-         
-        dependents.append(-1)
-        labels.append(-1)
-        buffer_index += 1
+        if word_id == data_utils._EOS and not self.stack_next:
+          has_eos = True
+        else:
+          sentence.append(word_id)
+          # compute next hidden state
+          id_tensor = torch.LongTensor([word_id]).view(1, 1)
+          embed = self.encoder_model.drop(self.encoder_model.embed(nn_utils.to_var(id_tensor,
+              self.use_cuda, True)).view(1, 1, -1))
+          output, hidden = self.encoder_model.rnn(embed, hidden)
+          output = self.encoder_model.drop(output)
+          encoder_output.append(output)
+           
+          dependents.append(-1)
+          labels.append(-1)
+          buffer_index += 1
       else:  
         assert len(stack) > 0
         child = stack.pop()
-        if action == data_utils._LA:
+        if len(stack) == 0:
+            has_eos = True
+        elif action == data_utils._LA:
           dependents[child] = buffer_index
         else:
           dependents[child] = stack[-1]
-          if len(stack) == 1 and len(sentence) > 1:
-            has_eos = True
+          #if len(stack) == 1 and len(sentence) > 1:
         labels[child] = label
 
     actions = given_actions if given_actions is not None else predicted_actions
@@ -292,10 +307,13 @@ class ArcHybridSup(nn.Module):
     greedy_word_loss = 0
     greedy_loss = 0
 
-    while buffer_index < sent_length or len(stack) > 1:
+    while (buffer_index < sent_length or len(stack) > 1 
+           or (self.stack_next and len(stack) > 0)):
       #print(buffer_index)
-      if given_actions is not None:
-        assert len(given_actions) > num_actions
+      if buffer_index == sent_length and self.stack_next and len(stack) == 1:
+        action = data_utils._LA
+      elif given_actions is not None:
+        assert num_actions < len(given_actions)
         action = given_actions[num_actions]
       else:
         action = data_utils._SH
@@ -310,9 +328,9 @@ class ArcHybridSup(nn.Module):
       def _test_logit(logit):
         return float(nn_utils.to_numpy(logit)) > 0
 
-      if len(stack) > 1: # allowed to ra or la
+      if len(stack) > 1 or (self.stack_next and len(stack) > 0): # allowed to ra or la
         transition_logit = self.transition_model(features)
-        if buffer_index == sent_length:
+        if buffer_index == sent_length and len(stack) > 1:
           if given_actions is not None:
             assert action == data_utils._RA
           else:
@@ -332,6 +350,8 @@ class ArcHybridSup(nn.Module):
           else:
             transition_prob = self.binary_log_normalize(-transition_logit)
           greedy_loss += nn_utils.to_numpy(transition_prob.view(1))
+          if self.stack_next and buffer_index == sent_length:
+            greedy_word_loss += nn_utils.to_numpy(transition_prob.view(1))
 
         if sh_action == data_utils._SRE:
           if given_actions is not None:
@@ -379,7 +399,7 @@ class ArcHybridSup(nn.Module):
         labels[child] = label
 
     actions = given_actions if given_actions is not None else predicted_actions
-    return actions, dependents, labels, -greedy_loss[0]
+    return actions, dependents, labels, -greedy_word_loss[0]
 
 
   def backtrack_path(self, i, j, split_indexes, directions):
@@ -395,14 +415,13 @@ class ArcHybridSup(nn.Module):
  
 
   def viterbi_score(self, encoder_features, word_ids):
-    # assume stack_next for now
-    assert self.stack_next
     assert self.generative
     sent_length = len(word_ids) - 1
     seq_length = len(word_ids)
 
     # compute all sh/re and word probabilities
     shift_log_probs = np.zeros([seq_length, seq_length])
+    reduce_log_probs = np.zeros([seq_length, seq_length])
     la_log_probs = np.zeros([seq_length, seq_length])
     ra_log_probs = np.zeros([seq_length, seq_length])
 
@@ -422,7 +441,8 @@ class ArcHybridSup(nn.Module):
     counter = 0 
     for i in range(seq_length-1):
       for j in range(i+1, seq_length):
-        shift_log_probs[i, j] = sh_log_probs_list[counter] # counter, 0]
+        shift_log_probs[i, j] = sh_log_probs_list[counter]
+        reduce_log_probs[i, j] = re_log_probs_list[counter]
         la_log_probs[i, j] = (re_log_probs_list[counter] 
                               + la_dir_log_probs_list[counter])
         ra_log_probs[i, j] = (re_log_probs_list[counter] 
@@ -430,7 +450,7 @@ class ArcHybridSup(nn.Module):
 
         if j < sent_length:
           word_log_probs[i, j] = nn_utils.to_numpy(
-              word_distr_list[counter, word_ids[j]])
+              word_distr_list[counter, word_ids[j if self.stack_next else j+1]])
         counter += 1
 
     table_size = seq_length
@@ -440,20 +460,30 @@ class ArcHybridSup(nn.Module):
     table_ned.fill(-np.inf) # log probabilities
 
     split_indexes = np.zeros((table_size, table_size), dtype=np.int)
+    split_indexes_ned = np.zeros((table_size, table_size), dtype=np.int)
     directions = np.zeros((table_size, table_size), dtype=np.int)
     directions.fill(data_utils._DRA) # default direction
 
-    for j in range(0, sent_length):
-      table[j, j+1] = 0
-      table_ned[j, j+1] = 0
-
     word_seq_score = 0
-    final_reduce_score = 0 #TODO issue is how to compute EOS prob
+
+    for j in range(0, sent_length):
+      if not self.stack_next and j == 0:
+        init_features = nn_utils.select_features(encoder_features[1], [0, 0], self.use_cuda)
+        init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
+        table[0, 1] = nn_utils.to_numpy(init_word_distr[word_ids[1]])
+        table_ned[0, 1] = table[0, 1]
+        word_seq_score = table[0, 1]
+      else:
+        table[j, j+1] = 0
+        table_ned[j, j+1] = 0
+
+    ned_split_index = 0
+    split_index_list = []
 
     for j in range(2, sent_length+1):
-      ned_block_scores = []
       for i in range(j-2, -1, -1):
         block_scores = []
+        ned_block_scores = []
         block_directions = []
         for k in range(i+1, j):
           score = (table[i, k] + table[k, j] 
@@ -467,29 +497,33 @@ class ArcHybridSup(nn.Module):
             score += la_prob
             block_directions.append(data_utils._DLA)
           block_scores.append(score)
-          if i == 0:
-            ned_score = score
-            #ned_score = (table[0, k] + table_ned[k, j] 
-            #             + shift_log_probs[0, k] + word_log_probs[0, k])
-            ned_block_scores.append(ned_score)
-        ind = np.argmax(block_scores)
-        k = ind + i + 1
-        table[i, j] = block_scores[ind]
-        split_indexes[i, j] = k
-        directions[i, j] = block_directions[ind]
-        # No final reduce, don't compute p(w_{j-1}) yet.
-        ned_score = table[i, j-1] + table[j-1, j] + shift_log_probs[i, j-1]
-        table_ned[i, j] = ned_score # is table_ned[0, j] == ned_block_score[j-1]
-      # if i == 0:
-      ind = np.argmax(ned_block_scores)
-      split_index = ind + 1 
-      #path_score = ned_block_scores[ind]
-      ##if path_score < table_ned[0, j]
-      if j < sent_length:
-        word_seq_score += word_log_probs[split_index, j]
+          ned_score = (table[0, k] + table[k, j]  #table_ned
+                       + shift_log_probs[0, k] + word_log_probs[0, k])
+          ned_block_scores.append(ned_score)
 
-    #actions = backtrack_path(0, sent_length)
-    #return self.greedy_decode(encoder_features, word_ids, actions)
+        ind = np.argmax(block_scores)
+        table[i, j] = block_scores[ind]
+        split_indexes[i, j] = ind + i + 1
+        directions[i, j] = block_directions[ind]
+        
+        ned_ind = np.argmax(ned_block_scores)
+        table_ned[i, j] = ned_block_scores[ned_ind]
+        split_indexes_ned[i, j] = ned_ind + i + 1
+
+      # want to generate j-1 (j for buffer_next)
+      i = 0
+      k = split_indexes_ned[i, j]
+      while k < j-1:
+        i = k
+        k = split_indexes_ned[i, j]
+      word_seq_score += word_log_probs[i, j-1]
+      ned_split_index = i
+      split_index_list.append(i)
+      if j == sent_length and self.stack_next:
+        for k in range(ned_split_index, -1, -1):
+          word_seq_score += reduce_log_probs[k, j]
+
+    #print(split_index_list)
     return word_seq_score
 
   # score outside computation graph
@@ -526,7 +560,12 @@ class ArcHybridSup(nn.Module):
     table.fill(-np.inf) # log probabilities
 
     for j in range(0, sent_length):
-      table[j, j+1] = 0
+      if not self.stack_next and j == 0:
+        init_features = nn_utils.select_features(encoder_features[1], [0, 0], self.use_cuda)
+        init_word_distr = self.log_normalize(self.word_model(init_features).view(-1))
+        table[0, 1] = nn_utils.to_numpy(init_word_distr[word_ids[1]])
+      else:
+        table[j, j+1] = 0
 
     for j in range(2, sent_length+1):
       for i in range(j-2, -1, -1):
@@ -544,7 +583,11 @@ class ArcHybridSup(nn.Module):
 
     #print("sum % f" % float(table[0, sent_length]))
     #print("argmax % f" % float(table_max[0, sent_length]))
-    return table[0, sent_length]
+    if self.stack_next:
+      final_score = reduce_log_probs[0, sent_length]
+    else:
+      final_score = 0
+    return table[0, sent_length] + final_score
 
 
   # score outside computation graph
@@ -602,7 +645,11 @@ class ArcHybridSup(nn.Module):
           #table[l, i, j] = block_scores[np.argmax(block_scores)] 
           table[l, i, j] = block_score
 
-    return table[0, 0, sent_length]
+    if self.stack_next:
+      final_score = reduce_log_probs[0, sent_length]
+    else:
+      final_score = 0
+    return table[0, 0, sent_length] + final_score
 
 
   def viterbi_decode(self, encoder_features, word_ids):
@@ -856,18 +903,20 @@ class ArcHybridSup(nn.Module):
             if len(stack.roots[-1].children) == num_children[s0]:
               action = data_utils._RA 
    
-      position = nn_utils.extract_feature_positions(buffer_index, s0,
+      if buffer_index > 0 or not self.stack_next:
+        position = nn_utils.extract_feature_positions(buffer_index, s0,
           more_context=False, stack_next=self.stack_next) #(stack ind, buffer ind)
-      tr_features.append(position)
-      actions.append(action)
+        tr_features.append(position)
+        actions.append(action)
       
       if action == data_utils._SH:
         if buffer_index+1 < sent_length or self.stack_next:
           word = conll[buffer_index if self.stack_next else buffer_index+1].word_id
         else:
           word = data_utils._EOS
-        gen_features.append(position)
-        words.append(word)
+        if buffer_index > 0 or not self.stack_next:
+          gen_features.append(position)
+          words.append(word)
       else:
         label = stack.roots[-1].relation_id
         label_features.append(position)
@@ -888,6 +937,18 @@ class ArcHybridSup(nn.Module):
           buf.roots[0].children.append(child) 
         else:
           stack.roots[-1].children.append(child)
+
+    # final reduce for stack_next
+    if self.stack_next:
+      action = data_utils._LA
+      s0 = stack.roots[-1].id if len(stack) > 0 else 0
+      position = nn_utils.extract_feature_positions(buffer_index, s0,
+          more_context=False, stack_next=True)
+      tr_features.append(position)
+      actions.append(action)
+      label = stack.roots[-1].relation_id # not actually used
+      label_features.append(position)
+      labels.append(label)
 
     stackops, directions = self.decompose_transitions(actions)
     predictions = (list(map(lambda x: torch.FloatTensor(x).view(-1, 1), 

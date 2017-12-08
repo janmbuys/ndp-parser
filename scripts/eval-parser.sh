@@ -10,7 +10,7 @@ i=$STARTI
 while [[ $i -le $ENDI ]]; do
   NI="$i"
   echo "DEV "$NI
-  $HOME/ndpdp/tools/eval.pl -q -g $DDIR/dev.conll -s $WDIR/dev.$NI".output.conll"
+  $HOME/ndpdp/tools/eval.pl -q -g $DDIR-working/dev.conll -s $WDIR/dev.$NI".conll"
   ((i = i + $STEPI))
 done
 

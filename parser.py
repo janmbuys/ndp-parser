@@ -68,6 +68,9 @@ if __name__=='__main__':
 
   parser.add_argument('--viterbi_decode', action='store_true',
                       help='Perform Viterbi decoding')
+  parser.add_argument('--viterbi_score', action='store_true', 
+                      help='Score based on incremental Viterbi parse', 
+                      default=False)
   parser.add_argument('--inside_decode', action='store_true',
                       help='Compute inside score for decoding')
   parser.add_argument('--arc_hybrid', action='store_true',

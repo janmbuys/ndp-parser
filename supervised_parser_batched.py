@@ -123,13 +123,12 @@ def training_score(args, stack_model, val_sentences):
   total_length_more = 0
 
   stack_model.eval()
-  viterbi_score = False
   
   print('Scoring val sentences')
   for val_sent in val_sentences:
     sentence_data = nn_utils.get_sentence_data_batch([val_sent], args.cuda,
         evaluation=True)
-    if viterbi_score:
+    if args.viterbi_score:
       loss = stack_model.viterbi_neg_log_likelihood(sentence_data)
       total_loss += loss
     else:
