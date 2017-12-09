@@ -56,6 +56,9 @@ if __name__=='__main__':
   parser.add_argument('--score', action='store_true', 
                       help='Only score, assuming existing model', 
                       default=False)
+  parser.add_argument('--viterbi_train', action='store_true', 
+                      help='Viterbi EM, assuming existing model', 
+                      default=False)
   parser.add_argument('--test', action='store_true', 
                       help='Evaluate test set', 
                       default=False)
@@ -68,6 +71,8 @@ if __name__=='__main__':
 
   parser.add_argument('--viterbi_decode', action='store_true',
                       help='Perform Viterbi decoding')
+  parser.add_argument('--viterbi_unsup', action='store_true',
+                      help='Unsupervised Viterbi EM training')
   parser.add_argument('--viterbi_score', action='store_true', 
                       help='Score based on incremental Viterbi parse', 
                       default=False)
@@ -221,6 +226,8 @@ if __name__=='__main__':
       supervised_parser_batched.decode(args, val_sentences, word_vocab, rel_vocab)
     elif args.score:
       supervised_parser_batched.decode(args, val_sentences, word_vocab, rel_vocab, score=True)
+    elif args.viterbi_train:
+      supervised_parser_batched.viterbi_train(args, sentences, val_sentences, word_vocab, rel_vocab)
     else:
       supervised_parser_batched.train(args, sentences, val_sentences, word_vocab, rel_vocab)
   else:

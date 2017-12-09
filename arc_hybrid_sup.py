@@ -397,9 +397,13 @@ class ArcHybridSup(nn.Module):
         else:
           dependents[child] = stack[-1]
         labels[child] = label
+    if self.generative:
+      loss = -greedy_word_loss[0]
+    else:
+      loss = 0
 
     actions = given_actions if given_actions is not None else predicted_actions
-    return actions, dependents, labels, -greedy_word_loss[0]
+    return actions, dependents, labels, loss
 
 
   def backtrack_path(self, i, j, split_indexes, directions):
