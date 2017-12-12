@@ -352,7 +352,40 @@ def isProjOrder(sentence):
     return False, order
 
 
-def read_conll(fh, projectify, replicate_rnng=False, pos_only=False):
+def swapNsubj(sentence, children, i):
+  """Swap nsubj edges."""
+  k = 0
+  parent = sentence[i].parent_id
+  while k < len(children[i]) and children[i][k] < i:
+    child = children[i][k]
+    if sentence[child].relation == 'nsubj':
+      head_relation = sentence[i].relation
+      sentence[i].parent_id = child
+      sentence[i].relation = 'nsubj-of'
+      sentence[child].parent_id = parent
+      sentence[child].relation = head_relation
+      for l in range(k):
+        sibling = children[i][l]
+        sentence[sibling].parent_id = child
+    else:
+      swapNsubj(sentence, children, child)
+    k += 1
+  while k < len(children[i]):
+    swapNsubj(sentence, children, children[i][k])
+    k += 1
+
+
+def reheadSubject(sentence):
+  #print('xx')
+  children = [[] for _ in sentence]
+  for i in range(1, len(sentence)):
+    assert sentence[i].parent_id < len(sentence), sentence[i].parent_id
+    children[sentence[i].parent_id].append(i)
+  swapNsubj(sentence, children, 0)
+ 
+
+def read_conll(fh, projectify, replicate_rnng=False, pos_only=False,
+        swap_subject=False):
   dropped = 0
   non_proj = 0
   read = 0
@@ -362,18 +395,24 @@ def read_conll(fh, projectify, replicate_rnng=False, pos_only=False):
     line = line.rstrip('\n')
     if not line:
       if len(tokens)>1:
+        if swap_subject:
+          reheadSubject(tokens)
         is_proj = True
         if projectify:
           is_proj, order = isProjOrder(tokens)
           if not is_proj:
             non_proj += 1
           # Don't drop projective, modify to make projective
-          while not is_proj:
+          update = True
+          while (not is_proj and update):
+            update = False
             for i in range(1, len(order)):
               if order[i] < order[i-1]: # reattach to grandparent
+                #print(i)
                 parent_id = tokens[order[i]].parent_id
                 grandparent_id = tokens[parent_id].parent_id
                 tokens[order[i]].parent_id = grandparent_id
+                update = True
                 break
             is_proj, order = isProjOrder(tokens)
             if not is_proj and grandparent_id == 0:
@@ -451,14 +490,14 @@ def read_sentences_txt_fixed_vocab(txt_path, txt_name, working_path):
 
 def read_sentences_create_vocab(conll_path, conll_name, working_path,
     projectify=False, use_unk_classes=True, replicate_rnng=False, 
-    pos_only=False, max_length=-1): 
+    pos_only=False, max_length=-1, swap_subject=False): 
   wordsCount = Counter()
   posCount = Counter()
   relCount = Counter()
 
   conll_sentences = []
   with open(conll_path + conll_name + '.conll', 'r') as conllFP:
-    for sentence in read_conll(conllFP, projectify, replicate_rnng, pos_only):
+    for sentence in read_conll(conllFP, projectify, replicate_rnng, pos_only, swap_subject):
       #if max_length <= 0 or len(sentence) <= max_length:
       conll_sentences.append(sentence)
       wordsCount.update([node.form for node in sentence])
@@ -512,7 +551,7 @@ def read_sentences_create_vocab(conll_path, conll_name, working_path,
 
 def read_sentences_given_vocab(conll_path, conll_name, working_path, 
     projectify=False, use_unk_classes=True, replicate_rnng=False, 
-    pos_only=False, max_length=-1): 
+    pos_only=False, max_length=-1, swap_subject=False): 
   word_vocab = Vocab.read_count_vocab(working_path + 'vocab')
   form_vocab = word_vocab.form_vocab()
   pos_vocab = Vocab.read_vocab(working_path + 'pos.vocab')
@@ -521,7 +560,7 @@ def read_sentences_given_vocab(conll_path, conll_name, working_path,
   sentences = []
   conll_sentences = []
   with open(conll_path + conll_name + '.conll', 'r') as conllFP:
-    for sentence in read_conll(conllFP, projectify, replicate_rnng, pos_only):
+    for sentence in read_conll(conllFP, projectify, replicate_rnng, pos_only, swap_subject):
       #if max_length <= 0 or len(sentence) <= max_length:
       conll_sentences.append(sentence)
       for j, node in enumerate(sentence):

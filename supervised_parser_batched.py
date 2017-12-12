@@ -423,7 +423,8 @@ def viterbi_train(args, sentences, dev_sentences, word_vocab, rel_vocab):
                   True) 
         #greedy_loss += greedy_word_loss
         for i, entry in enumerate(sent.conll):
-          sent.conll[i].parent_id = dependents[i]
+          if i > 0:
+            sent.conll[i].parent_id = dependents[i]
 
     # run the oracle
     for sentence in sentences:

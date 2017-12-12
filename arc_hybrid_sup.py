@@ -392,10 +392,11 @@ class ArcHybridSup(nn.Module):
       else:  
         assert len(stack) > 0
         child = stack.pop()
-        if action == data_utils._LA:
-          dependents[child] = buffer_index
-        else:
-          dependents[child] = stack[-1]
+        if child > 0:
+          if action == data_utils._LA:
+            dependents[child] = buffer_index
+          else:
+            dependents[child] = stack[-1]
         labels[child] = label
     if self.generative:
       loss = -greedy_word_loss[0]
@@ -881,7 +882,8 @@ class ArcHybridSup(nn.Module):
 
     num_children = [0 for _ in conll]
     for token in conll:
-      num_children[token.parent_id] += 1
+      if token.parent_id >= 0:
+        num_children[token.parent_id] += 1
 
     actions = []
     labels = []

@@ -36,6 +36,8 @@ if __name__=='__main__':
                       default=False)
   parser.add_argument('--reset_vocab', action='store_true', 
                       default=False)
+  parser.add_argument('--swap_subject', action='store_true', 
+                      default=False)
   parser.add_argument('--max_sentence_length', type=int, default=-1,
                       help='maximum training sentence length')
   parser.add_argument('--no_unk_classes', action='store_true', 
@@ -53,14 +55,14 @@ if __name__=='__main__':
         data_path, args.train_name, data_working_path, projectify=True, 
         use_unk_classes = not args.no_unk_classes,
         replicate_rnng=args.replicate_rnng_data,
-        max_length=args.max_sentence_length)
+        max_length=args.max_sentence_length, swap_subject=args.swap_subject)
   else:     
     print('Preparing vocab')
     sentences, word_vocab, pos_vocab, rel_vocab = data_utils.read_sentences_create_vocab(
         data_path, args.train_name, data_working_path, projectify=True, 
         use_unk_classes = not args.no_unk_classes,
         replicate_rnng=args.replicate_rnng_data, 
-        max_length=args.max_sentence_length)
+        max_length=args.max_sentence_length, swap_subject=args.swap_subject )
 
     data_utils.create_length_histogram(sentences, data_working_path)
 
@@ -68,12 +70,12 @@ if __name__=='__main__':
   dev_sentences, _, _, _ = data_utils.read_sentences_given_vocab(
       data_path, args.dev_name, data_working_path, projectify=False, 
       use_unk_classes = not args.no_unk_classes,
-      replicate_rnng=args.replicate_rnng_data)
+      replicate_rnng=args.replicate_rnng_data, swap_subject=args.swap_subject)
 
   test_sentences, _,  _, _ = data_utils.read_sentences_given_vocab(
       data_path, args.test_name, data_working_path, projectify=False, 
       use_unk_classes = not args.no_unk_classes,
-      replicate_rnng=args.replicate_rnng_data)
+      replicate_rnng=args.replicate_rnng_data, swap_subject=args.swap_subject)
 
   data_utils.write_conll_baseline(data_working_path + 'dev.baseline.conll', 
       [sent.conll for sent in dev_sentences])
