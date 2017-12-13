@@ -57,6 +57,31 @@ def batch_feature_selection(input_features, seq_length, use_cuda=False,
   # dim seq_length, batch_size, 2, feat_size
   return torch.cat((left_selected_features, right_selected_features), 2)
 
+def batch_feature_selection_more_context(input_features, seq_length, use_cuda=False,
+    stack_next=False):
+  leftmost_indexes = [] 
+  left_indexes = [] 
+  right_indexes = [] 
+  for i in range(seq_length-1):
+    for j in range(i+1, seq_length):
+      for l in range(max(i, 1)):
+        leftmost_indexes.append(l)
+        left_indexes.append(i)
+        right_indexes.append(j-1 if stack_next else j)
+
+  leftmost_positions = to_var(torch.LongTensor(leftmost_indexes), use_cuda)
+  left_positions = to_var(torch.LongTensor(left_indexes), use_cuda)
+  right_positions = to_var(torch.LongTensor(right_indexes), use_cuda)
+
+  leftmost_selected_features = torch.index_select(input_features, 0,
+      leftmost_positions).view(-1, input_features.size(1), 1, input_features.size(2))
+  left_selected_features = torch.index_select(input_features, 0,
+      left_positions).view(-1, input_features.size(1), 1, input_features.size(2))
+  right_selected_features = torch.index_select(input_features, 0, 
+      right_positions).view(-1, input_features.size(1), 1, input_features.size(2))
+  # dim seq_length, batch_size, 2, feat_size
+  return torch.cat((leftmost_selected_features, left_selected_features, right_selected_features), 2)
+
 def old_batch_feature_selection(input_features, seq_length, use_cuda=False,
     rev=False):
   indexes = [] 
@@ -80,13 +105,17 @@ def old_batch_feature_selection(input_features, seq_length, use_cuda=False,
 
 def extract_feature_positions(b, s0, s1=None, s2=None, more_context=False,
   stack_next=False):
-  # Ensure feature extraction is consistent
-  if more_context and s1 is not None and s2 is not None:
-    return [s2, s1, s0, b]
-  elif stack_next:
-    return [s0, max(0, b-1)]
+  if more_context:
+    assert s1 is not None
+    if stack_next:
+      return [s1, s0, max(0, b-1)]
+    else:
+      return [s1, s0, b]
   else:
-    return [s0, b]
+    if stack_next:
+      return [s0, max(0, b-1)]
+    else:
+      return [s0, b]
 
 
 def filter_logits(logits, targets, float_var=False, use_cuda=False):

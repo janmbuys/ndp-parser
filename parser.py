@@ -176,7 +176,6 @@ if __name__=='__main__':
   args = parser.parse_args()
   assert not (args.generative and args.bidirectional), 'Bidirectional encoder invalid for generative model'
   assert args.arc_hybrid or args.arc_eager or args.unsup
-  assert not (args.use_more_features and args.decompose_actions), 'For decomposed features use small contexts'
 
   # TODO check if this has the same effect across different files
   torch.manual_seed(args.seed) 
