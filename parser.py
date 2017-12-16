@@ -59,6 +59,9 @@ if __name__=='__main__':
   parser.add_argument('--viterbi_train', action='store_true', 
                       help='Viterbi EM, assuming existing model', 
                       default=False)
+  parser.add_argument('--marginal_train', action='store_true', 
+                      help='Marginal training, assuming existing model', 
+                      default=False)
   parser.add_argument('--test', action='store_true', 
                       help='Evaluate test set', 
                       default=False)
@@ -227,6 +230,8 @@ if __name__=='__main__':
       supervised_parser_batched.decode(args, val_sentences, word_vocab, rel_vocab, score=True)
     elif args.viterbi_train:
       supervised_parser_batched.viterbi_train(args, sentences, val_sentences, word_vocab, rel_vocab)
+    elif args.marginal_train:
+      supervised_parser_batched.marginal_train(args, sentences, val_sentences, word_vocab, rel_vocab)
     else:
       supervised_parser_batched.train(args, sentences, val_sentences, word_vocab, rel_vocab)
   else:

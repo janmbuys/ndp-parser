@@ -306,12 +306,13 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
         epoch, (time.time() - epoch_start_time), batch_count, global_num_tokens,
         avg_global_loss, math.exp(avg_global_loss)))
 
-    # Decoding
-    out_name = args.working_dir + '/' + args.dev_name + '.' + str(epoch)
-    training_decode(dev_sentences, stack_model, word_vocab, rel_vocab,
-        out_name + '.conll', out_name + '.tr', args.viterbi_decode, use_cuda=args.cuda)
+    # Decoding TODO temp disable
+    if False:
+      out_name = args.working_dir + '/' + args.dev_name + '.' + str(epoch)
+      training_decode(dev_sentences, stack_model, word_vocab, rel_vocab,
+         out_name + '.conll', out_name + '.tr', args.viterbi_decode, use_cuda=args.cuda)
 
-    if args.generative:
+    if args.generative and (epoch % 5 == 0): #TODO temp
       # score the model 
       decode_start_time = time.time()
       total_loss, total_length, total_length_more = training_score(args,
@@ -325,6 +326,9 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
       print('                     | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(
            val_loss_more, math.exp(val_loss_more)))
       print('-' * 89)
+    else:
+      val_loss = 0
+      patience_count = 0
 
     # Anneal the learning rate.
     if (not args.adam and args.num_init_lr_epochs > 0 
@@ -461,6 +465,168 @@ def viterbi_train(args, sentences, dev_sentences, word_vocab, rel_vocab):
       stack_model.zero_grad() 
       loss = stack_model.joint_neg_log_likelihood(sentence_data,
           sentence_feats, sentence_preds)
+
+      if loss is not None:
+        loss.backward()
+        if args.grad_clip > 0:
+          nn.utils.clip_grad_norm(params, args.grad_clip)
+        optimizer.step() 
+        total_loss += loss.data
+        global_loss += loss.data
+
+      batch_tokens = (sentence_data.size()[0] - 2)*local_batch_size
+      total_num_tokens += batch_tokens
+      global_num_tokens += batch_tokens
+
+      if batch_count % args.logging_interval == 0 and i > 0:
+        cur_loss = total_loss[0] / total_num_tokens
+        elapsed = time.time() - start_time
+        print('| epoch {:3d} | {:5d} batches | lr {:02.4f} | ms/batch {:5.2f} | '
+                'loss {:5.2f} | ppl {:8.2f}'.format(
+            epoch, batch_count, lr,
+            elapsed * 1000 / args.logging_interval, cur_loss, 
+            math.exp(cur_loss)))
+        total_loss = 0
+        total_num_tokens = 0
+        start_time = time.time()
+
+    avg_global_loss = global_loss[0] / global_num_tokens
+    print('-' * 89)
+    print('| end of epoch {:3d} | time: {:5.2f}s | {:5d} batches | tokens {:5d} | loss {:5.2f} | ppl {:8.2f}'.format(
+        epoch, (time.time() - epoch_start_time), batch_count, global_num_tokens,
+        avg_global_loss, math.exp(avg_global_loss)))
+
+    # Decoding
+    out_name = args.working_dir + '/' + args.dev_name + '.' + str(epoch)
+    training_decode(dev_sentences, stack_model, word_vocab, rel_vocab,
+        out_name + '.em.conll', out_name + '.em.tr', args.viterbi_decode, use_cuda=args.cuda)
+
+    if args.generative:
+      # score the model 
+      decode_start_time = time.time()
+      total_loss, total_length, total_length_more = training_score(args,
+          stack_model, dev_sentences)
+
+      val_loss = total_loss / total_length
+      val_loss_more = total_loss / total_length_more
+      print('-' * 89)
+      print('| scoring time: {:5.2f}s | valid loss {:5.2f} | valid ppl {:8.2f} '.format(
+           (time.time() - decode_start_time), val_loss, math.exp(val_loss)))
+      print('                     | valid loss more {:5.2f} | valid ppl {:8.2f}'.format(
+           val_loss_more, math.exp(val_loss_more)))
+      print('-' * 89)
+
+    # Anneal the learning rate.
+    if not args.adam:
+      if args.reduce_lr and val_loss > prev_val_loss:
+        lr /= 2
+      else:
+        lr = lr / args.lr_decay
+      for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+    if args.generative and prev_val_loss and val_loss > prev_val_loss:
+      patience_count += 1
+    else:
+      patience_count = 0
+      if args.generative:
+        prev_val_loss = val_loss
+      # Save the model.
+      if args.save_model != '':
+        model_fn = args.working_dir + '/' + args.save_model + '.pt'
+        with open(model_fn, 'wb') as f:
+          torch.save(stack_model, f)
+
+    if args.store_all_iterations:
+      model_fn = (args.working_dir + '/' + args.save_model + '.' + str(epoch) 
+                  + '.pt')
+      with open(model_fn, 'wb') as f:
+        torch.save(stack_model, f)
+
+    if args.patience > 0 and patience_count >= args.patience:
+      break
+
+
+def marginal_train(args, sentences, dev_sentences, word_vocab, rel_vocab):
+  # Train on marginla probability to fine-tune given model.
+  vocab_size = len(word_vocab)
+  num_relations = len(rel_vocab)
+  model_path = args.working_dir + '/' + args.save_model
+  lr = args.lr
+  non_lin = args.non_lin #TODO better interface
+  gen_non_lin = args.gen_non_lin
+  load_model = not args.viterbi_unsup 
+
+  if load_model: 
+    assert model_path != ''
+    print('Loading models')
+    model_fn = model_path + '.pt'
+    with open(model_fn, 'rb') as f:
+      stack_model = torch.load(f)
+  else:
+    # Build the model
+    assert args.arc_hybrid or args.arc_eager
+    if args.arc_hybrid:
+      stack_model = arc_hybrid_sup.ArcHybridSup(vocab_size, num_relations,
+          args.embedding_size, args.hidden_size, args.num_layers, args.dropout,
+          args.init_weight_range, args.bidirectional, non_lin, gen_non_lin, 
+          args.generative, args.stack_next, args.use_more_features, args.cuda)
+    elif args.arc_eager:
+        assert False, "Not yet implemented."
+        #TODO 
+        # args.late_reduce_oracle)
+
+  if args.cuda:
+    stack_model.cuda()
+
+  print('Done loading models')
+
+  max_viterbi_length = 40
+  sentences = list(filter(lambda sent: len(sent) <= max_viterbi_length, sentences))
+  print('Training size {:3d}'.format(len(sentences)))
+
+  params = list(stack_model.parameters()) 
+
+  if args.adam:
+    optimizer = optim.Adam(params, lr=lr)
+  else:
+    optimizer = optim.SGD(params, lr=lr)
+
+  prev_val_loss = None
+  patience_count = 0
+  for epoch in range(1, args.epochs+1):
+    print('Start training epoch %d' % epoch)
+    epoch_start_time = time.time()
+   
+    random.shuffle(sentences)
+    sentences.sort(key=len) 
+
+    total_loss = 0 
+    global_loss = 0 
+    total_num_tokens = 0 
+    global_num_tokens = 0 
+    batch_count = 0
+
+    start_time = time.time()
+    i = 0  
+    while i < len(sentences):
+      # Training loop
+      length = len(sentences[i])
+      j = i + 1
+      while (j < len(sentences) and len(sentences[j]) == length
+             and (j - i) < args.batch_size):
+        j += 1
+      local_batch_size = j - i
+
+      sentence_data = nn_utils.get_sentence_data_batch(
+          [sentences[k] for k in range(i, j)], args.cuda)
+      local_batch_size = j - i
+      i = j
+      batch_count += 1
+
+      stack_model.train()
+      stack_model.zero_grad()
+      loss = stack_model.neg_log_likelihood_train(sentence_data)
+      #print(loss)
 
       if loss is not None:
         loss.backward()
