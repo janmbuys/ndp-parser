@@ -1237,10 +1237,10 @@ class ArcHybridSup(nn.Module):
     encoder_features = self.encoder_model(sentence, encoder_state)
     word_ids = [int(x) for x in sentence.view(-1).data]
 
-    batch_loss = self.inside_algorithm(
-        encoder_features, sentence, batch_size)
-    #batch_loss = self.inside_algorithm_cubic(
+    #batch_loss = self.inside_algorithm(
     #    encoder_features, sentence, batch_size)
+    batch_loss = self.inside_algorithm_cubic(
+        encoder_features, sentence, batch_size)
     batch_loss[batch_loss != batch_loss] = 0
     loss = -torch.sum(batch_loss)
     return loss

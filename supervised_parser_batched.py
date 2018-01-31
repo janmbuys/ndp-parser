@@ -255,20 +255,30 @@ def train(args, sentences, dev_sentences, word_vocab, rel_vocab):
     global_num_tokens = 0 
     batch_count = 0
 
-    start_time = time.time()
+    # new batching
+    batch_inds = []
     i = 0  
     while i < len(sentences):
       # Training loop
       length = len(sentences[i])
       j = i + 1
-      while (j < len(sentences) and len(sentences[j]) == length
+      if args.token_balanced_batches:
+        while (j < len(sentences) and len(sentences[j]) == length
+               and (j - i)*length < args.batch_size):
+          j += 1
+      else:
+        while (j < len(sentences) and len(sentences[j]) == length
              and (j - i) < args.batch_size):
-        j += 1
-      local_batch_size = j - i
-      sentence_data, sentence_feats, sentence_preds = nn_utils.get_sentence_oracle_data_batch(
-          [sentences[k] for k in range(i, j)], args.cuda)
-
+          j += 1
+      batch_inds.append(list(range(i, j)))
       i = j
+    random.shuffle(batch_inds)
+
+    start_time = time.time()
+    for batch_ind in batch_inds: 
+      sentence_data, sentence_feats, sentence_preds = nn_utils.get_sentence_oracle_data_batch(
+          [sentences[k] for k in batch_ind], args.cuda)
+      local_batch_size = len(batch_ind)
       batch_count += 1
 
       stack_model.train()
@@ -547,14 +557,15 @@ def viterbi_train(args, sentences, dev_sentences, word_vocab, rel_vocab):
 
 
 def marginal_train(args, sentences, dev_sentences, word_vocab, rel_vocab):
-  # Train on marginla probability to fine-tune given model.
+  # Train on marginal probability to fine-tune given model.
   vocab_size = len(word_vocab)
   num_relations = len(rel_vocab)
   model_path = args.working_dir + '/' + args.save_model
   lr = args.lr
   non_lin = args.non_lin #TODO better interface
   gen_non_lin = args.gen_non_lin
-  load_model = not args.viterbi_unsup 
+  load_model = False #TODO temp
+  #load_model = not args.viterbi_unsup 
 
   if load_model: 
     assert model_path != ''
@@ -606,21 +617,30 @@ def marginal_train(args, sentences, dev_sentences, word_vocab, rel_vocab):
     global_num_tokens = 0 
     batch_count = 0
 
-    start_time = time.time()
+    # new batching
+    batch_inds = []
     i = 0  
     while i < len(sentences):
       # Training loop
       length = len(sentences[i])
       j = i + 1
-      while (j < len(sentences) and len(sentences[j]) == length
+      if args.token_balanced_batches:
+        while (j < len(sentences) and len(sentences[j]) == length
+               and (j - i)*length < args.batch_size):
+          j += 1
+      else:
+        while (j < len(sentences) and len(sentences[j]) == length
              and (j - i) < args.batch_size):
-        j += 1
-      local_batch_size = j - i
-
-      sentence_data = nn_utils.get_sentence_data_batch(
-          [sentences[k] for k in range(i, j)], args.cuda)
-      local_batch_size = j - i
+          j += 1
+      batch_inds.append(list(range(i, j)))
       i = j
+    random.shuffle(batch_inds)
+
+    start_time = time.time()
+    for batch_ind in batch_inds: 
+      sentence_data = nn_utils.get_sentence_data_batch(
+          [sentences[k] for k in batch_ind], args.cuda)
+      local_batch_size = len(batch_ind)
       batch_count += 1
 
       stack_model.train()

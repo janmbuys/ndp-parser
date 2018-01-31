@@ -47,6 +47,8 @@ if __name__=='__main__':
                       default=False)
   parser.add_argument('--reset_vocab', action='store_true', 
                       default=False)
+  parser.add_argument('--token_balanced_batches', action='store_true', 
+                      default=False)
   parser.add_argument('--txt_data_fixed_vocab', action='store_true', 
                       default=False)
   parser.add_argument('--score', action='store_true', 
@@ -298,20 +300,46 @@ if __name__=='__main__':
       global_num_tokens = 0
       batch_count = 0
 
-      start_time = time.time()
+      # new batching
+      batch_inds = []
       i = 0  
       while i < len(sentences):
         # Training loop
         length = len(sentences[i])
         j = i + 1
-        while (j < len(sentences) and len(sentences[j]) == length
+        if args.token_balanced_batches:
+          while (j < len(sentences) and len(sentences[j]) == length
+                 and (j - i)*length < batch_size):
+            j += 1
+        else:
+          while (j < len(sentences) and len(sentences[j]) == length
                and (j - i) < batch_size):
-          j += 1
+            j += 1
+        batch_inds.append(list(range(i, j)))
+        i = j
+      random.shuffle(batch_inds)
+
+      start_time = time.time()
+      #i = 0  
+      #while i < len(sentences):
+        # Training loop
+        #length = len(sentences[i])
+        #j = i + 1
+        #while (j < len(sentences) and len(sentences[j]) == length
+        #       and (j - i) < batch_size):
+        #  j += 1
+        #  dimensions [length x batch]
+        #  data, targets = nn_utils.get_sentence_batch(
+        #   [sentences[k] for k in range(i, j)], args.cuda)
+        #  local_batch_size = j - i
+        #  i = j
+        #  batch_count += 1
+
+      for batch_ind in batch_inds: 
         # dimensions [length x batch]
         data, targets = nn_utils.get_sentence_batch(
-            [sentences[k] for k in range(i, j)], args.cuda)
-        local_batch_size = j - i
-        i = j
+            [sentences[k] for k in batch_ind], args.cuda)
+        local_batch_size = len(batch_ind)
         batch_count += 1
 
         model.zero_grad()

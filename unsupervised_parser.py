@@ -12,7 +12,7 @@ import torch.optim as optim
 
 import data_utils
 import nn_utils
-import shift_reduce_dp
+import shift_reduce_dp_cubic
 import arc_eager_dp
 
 def training_decode(val_sentences, stack_model, word_vocab, conll_output_fn,
@@ -135,7 +135,7 @@ def train(args, sentences, dev_sentences, word_vocab):
       args.stack_next, args.embed_only, args.embed_only_gen, 
       args.with_valency, args.cuda)
   else:
-    stack_model = shift_reduce_dp.ShiftReduceDP(vocab_size, args.embedding_size,
+    stack_model = shift_reduce_dp_cubic.ShiftReduceDP(vocab_size, args.embedding_size,
       args.hidden_size, args.num_layers, args.dropout,
       args.init_weight_range, non_lin,
       gen_non_lin, args.stack_next, args.embed_only, args.embed_only_gen, args.cuda)
@@ -166,24 +166,35 @@ def train(args, sentences, dev_sentences, word_vocab):
     global_num_tokens = 0 
     batch_count = 0
 
-    start_time = time.time()
-    print('Training size {:3d}'.format(len(sentences)))
-
+    # new batching
+    batch_inds = []
     i = 0  
     while i < len(sentences):
       # Training loop
       length = len(sentences[i])
       j = i + 1
-      while (j < len(sentences) and len(sentences[j]) == length
+      if args.token_balanced_batches:
+        while (j < len(sentences) and len(sentences[j]) == length
+               and (j - i)*length < batch_size):
+          j += 1
+      else:
+        while (j < len(sentences) and len(sentences[j]) == length
              and (j - i) < batch_size):
-        j += 1
-      # dimensions [length x batch]
-      sentence_data = nn_utils.get_sentence_data_batch(
-          [sentences[k] for k in range(i, j)], args.cuda)
-      local_batch_size = j - i
+          j += 1
+      batch_inds.append(list(range(i, j)))
       i = j
+    random.shuffle(batch_inds)
+
+    start_time = time.time()
+    print('Training size {:3d}'.format(len(sentences)))
+
+    for batch_ind in batch_inds: 
+      sentence_data = nn_utils.get_sentence_data_batch(
+          [sentences[k] for k in batch_ind], args.cuda)
+      local_batch_size = len(batch_ind)
       batch_count += 1
 
+      stack_model.train()
       stack_model.zero_grad()
       loss = stack_model.neg_log_likelihood(sentence_data)
       #print(loss)

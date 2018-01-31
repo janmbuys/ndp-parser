@@ -56,6 +56,8 @@ if __name__=='__main__':
   parser.add_argument('--score', action='store_true', 
                       help='Only score, assuming existing model', 
                       default=False)
+  parser.add_argument('--token_balanced_batches', action='store_true', 
+                      default=False)
   parser.add_argument('--viterbi_train', action='store_true', 
                       help='Viterbi EM, assuming existing model', 
                       default=False)
